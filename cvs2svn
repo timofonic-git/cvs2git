@@ -1172,11 +1172,6 @@ class CollectData(cvs2svn_rcsparse.Sink):
     # trunk.  This records the date at which 1.2 was committed.
     self.first_non_vendor_revision_date = None
 
-    # A list of all symbols defined for the current file.  Used to
-    # prevent multiple definitions of a symbol, something which can
-    # easily happen when --symbol-transform is used.
-    self.defined_symbols = [ ]
-
   def set_principal_branch(self, branch):
     self.default_branch = branch
 
@@ -1232,18 +1227,6 @@ class CollectData(cvs2svn_rcsparse.Sink):
     header, for example: '1.7', '1.7.0.2', or '1.1.1' or '1.1.1.1'.
     This function will determine what kind of symbolic name it is by
     inspection, and record it in the right places."""
-    for (pattern, replacement) in Ctx().symbol_transforms:
-      newname = re.sub(pattern, replacement, name)
-      if newname != name:
-        Log().write(LOG_WARN, "   symbol '%s' transformed to '%s'"
-                    % (name, newname))
-        name = newname
-    if name in self.defined_symbols:
-      err = "%s: Multiple definitions of the symbol '%s' in '%s'" \
-                % (error_prefix, name, self.fname)
-      sys.stderr.write(err + "\n")
-      self.fatal_errors.append(err)
-    self.defined_symbols.append(name)
     if branch_tag.match(revision):
       self.add_cvs_branch(revision, name)
     elif vendor_tag.match(revision):
@@ -4235,7 +4218,6 @@ class Ctx:
     self.forced_branches = []
     self.forced_tags = []
     self.excludes = []
-    self.symbol_transforms = []
 
 class MimeMapper:
   """A class that provides mappings from file names to MIME types.
@@ -4341,11 +4323,9 @@ def usage():
   print '  --dump-only          just produce a dumpfile, don\'t commit to a repos'
   print '  --encoding=ENC       encoding of log messages in CVS repos (default: %s)' \
         % Ctx().encoding
-  print '  --force-branch=NAME  force NAME to be a branch'
-  print '  --force-tag=NAME     force NAME to be a tag'
-  print '  --exclude=REGEXP     exclude branches and tags matching REGEXP'
-  print '  --symbol-transform=P:S transform symbol names from P to S where P and S'
-  print '                       use Python regexp and reference syntax respectively'
+  print '  --force-branch=NAME  Force NAME to be a branch.'
+  print '  --force-tag=NAME     Force NAME to be a tag.'
+  print '  --exclude=REGEXP     Exclude branches and tags matching REGEXP.'
   print '  --username=NAME      username for cvs2svn-synthesized commits'
   print '  --skip-cleanup       prevent the deletion of intermediate files'
   print '  --bdb-txn-nosync     pass --bdb-txn-nosync to "svnadmin create"'
@@ -4354,9 +4334,8 @@ def usage():
         '                       setting svn:mime-type'
   print '  --eol-from-mime-type set svn:eol-style by mime type (only with --mime-types)'
   print '  --no-default-eol     don\'t set svn:eol-style by CVS defaults'
-  print '  --keywords-off       don\'t set svn:keywords on any files (cvs2svn sets'
-  print '                       "svn:keywords to author date id" on non-binary files'
-  print '                       by default)'
+  print '  --keywords-off       don\'t set svn:keywords on any files (cvs2svn sets svn:keywords to '
+  print '                       "author date id" on non-binary files by default)'
 
 def main():
   # Convenience var, so we don't have to keep instantiating this Borg.
@@ -4377,8 +4356,7 @@ def main():
                                  "trunk-only", "no-prune", "dry-run",
                                  "dump-only", "dumpfile=", "tmpdir=",
                                  "svnadmin=", "skip-cleanup", "cvs-revnums",
-                                 "bdb-txn-nosync", "version", "profile",
-                                 "keywords-off", "symbol-transform="])
+                                 "bdb-txn-nosync", "version", "profile", "keywords-off"])
   except getopt.GetoptError, e:
     sys.stderr.write(error_prefix + ': ' + str(e) + '\n\n')
     usage()
@@ -4478,8 +4456,6 @@ def main():
           'default,\nand passing the option is deprecated.\n')
     elif opt == '--profile':
       profiling = 1
-    elif opt == '--symbol-transform':
-      ctx.symbol_transforms.append(value.split(":"))
       
   if ctx.print_help:
     usage()
