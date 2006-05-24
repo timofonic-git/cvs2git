@@ -2,23 +2,6 @@
 #
 #  run_tests.py:  test suite for cvs2svn
 #
-#  Usage: run_tests.py [-v | --verbose] [list | <num>]
-#
-#  Options:
-#      -v, --verbose
-#          enable verbose output
-#
-#  Arguments (at most one argument is allowed):
-#      list
-#          If the word "list" is passed as an argument, the list of
-#          available tests is printed (but no tests are run).
-#
-#      <num>
-#          If a number is passed as an argument, then only the test
-#          with that number is run.
-#
-#      If no argument is specified, then all tests are run.
-#
 #  Subversion is a tool for revision control.
 #  See http://subversion.tigris.org for more information.
 #
@@ -37,17 +20,12 @@
 import sys
 import shutil
 import stat
+import string
 import re
 import os
 import time
 import os.path
 import locale
-
-# Make sure this Python is recent enough.
-if sys.hexversion < 0x02020000:
-  sys.stderr.write("error: Python 2.2 or higher required, "
-                   "see www.python.org.\n")
-  sys.exit(1)
 
 # This script needs to run in the correct directory.  Make sure we're there.
 if not (os.path.exists('cvs2svn') and os.path.exists('test-data')):
@@ -61,6 +39,7 @@ import svntest
 # Abbreviations
 Skip = svntest.testcase.Skip
 XFail = svntest.testcase.XFail
+Item = svntest.wc.StateItem
 
 cvs2svn = os.path.abspath('cvs2svn')
 
@@ -143,7 +122,7 @@ def repos_to_url(path_to_svn_repos):
   rpath = os.path.abspath(path_to_svn_repos)
   if rpath[0] != '/':
     rpath = '/' + rpath
-  return 'file://%s' % rpath.replace(os.sep, '/')
+  return 'file://%s' % string.replace(rpath, os.sep, '/')
 
 if hasattr(time, 'strptime'):
   def svn_strptime(timestr):
@@ -156,7 +135,7 @@ else:
     return tuple(map(int, matches)) + (0, 1, -1)
 
 class Log:
-  def __init__(self, revision, author, date, symbols):
+  def __init__(self, revision, author, date):
     self.revision = revision
     self.author = author
 
@@ -169,10 +148,6 @@ class Log:
     # happily.
     self.date = time.mktime(svn_strptime(date[0:19]))
 
-    # The following symbols are used for string interpolation when
-    # checking paths:
-    self.symbols = symbols
-
     # The changed paths will be accumulated later, as log data is read.
     # Keys here are paths such as '/trunk/foo/bar', values are letter
     # codes such as 'M', 'A', and 'D'.
@@ -181,8 +156,28 @@ class Log:
     # The msg will be accumulated later, as log data is read.
     self.msg = ''
 
-  def absorb_changed_paths(self, out):
-    'Read changed paths from OUT into self, until no more.'
+  def __cmp__(self, other):
+    return cmp(self.revision, other.revision) or \
+        cmp(self.author, other.author) or cmp(self.date, other.date) or \
+        cmp(self.changed_paths, other.changed_paths) or \
+        cmp(self.msg, other.msg)
+
+
+def parse_log(svn_repos):
+  """Return a dictionary of Logs, keyed on revision number, for SVN_REPOS."""
+
+  class LineFeeder:
+    'Make a list of lines behave like an open file handle.'
+    def __init__(self, lines):
+      self.lines = lines
+    def readline(self):
+      if len(self.lines) > 0:
+        return self.lines.pop(0)
+      else:
+        return None
+
+  def absorb_changed_paths(out, log):
+    'Read changed paths from OUT into Log item LOG, until no more.'
     while 1:
       line = out.readline()
       if len(line) == 1: return
@@ -199,93 +194,7 @@ class Log:
       # m = re.match("(.*) \(from /.*:[0-9]+\)", path_portion)
       # if m:
       #   path_portion = m.group(1)
-      self.changed_paths[path_portion] = op_portion
-
-  def __cmp__(self, other):
-    return cmp(self.revision, other.revision) or \
-        cmp(self.author, other.author) or cmp(self.date, other.date) or \
-        cmp(self.changed_paths, other.changed_paths) or \
-        cmp(self.msg, other.msg)
-
-  def get_path_op(self, path):
-    """Return the operator for the change involving PATH.
-
-    PATH is allowed to include string interpolation directives (e.g.,
-    '%(trunk)s'), which are interpolated against self.symbols.  Return
-    None if there is no record for PATH."""
-    return self.changed_paths.get(path % self.symbols)
-
-  def check_msg(self, msg):
-    """Verify that this Log's message starts with the specified MSG."""
-    if self.msg.find(msg) != 0:
-      raise svntest.Failure(
-          "Revision %d log message was:\n%s\n\n"
-          "It should have begun with:\n%s\n\n"
-          % (self.revision, self.msg, msg,)
-          )
-
-  def check_change(self, path, op):
-    """Verify that this Log includes a change for PATH with operator OP.
-
-    PATH is allowed to include string interpolation directives (e.g.,
-    '%(trunk)s'), which are interpolated against self.symbols."""
-
-    path = path % self.symbols
-    found_op = self.changed_paths.get(path, None)
-    if found_op is None:
-      raise svntest.Failure(
-          "Revision %d does not include change for path %s "
-          "(it should have been %s).\n"
-          % (self.revision, path, op,)
-          )
-    if found_op != op:
-      raise svntest.Failure(
-          "Revision %d path %s had op %s (it should have been %s)\n"
-          % (self.revision, path, found_op, op,)
-          )
-
-  def check_changes(self, changed_paths):
-    """Verify that this Log has precisely the CHANGED_PATHS specified.
-
-    CHANGED_PATHS is a sequence of tuples (path, op), where the paths
-    strings are allowed to include string interpolation directives
-    (e.g., '%(trunk)s'), which are interpolated against self.symbols."""
-
-    cp = {}
-    for (path, op) in changed_paths:
-      cp[path % self.symbols] = op
-
-    if self.changed_paths != cp:
-      raise svntest.Failure(
-          "Revision %d changed paths list was:\n%s\n\n"
-          "It should have been:\n%s\n\n"
-          % (self.revision, self.changed_paths, cp,)
-          )
-
-  def check(self, msg, changed_paths):
-    """Verify that this Log has the MSG and CHANGED_PATHS specified.
-
-    Convenience function to check two things at once.  MSG is passed
-    to check_msg(); CHANGED_PATHS is passed to check_changes()."""
-
-    self.check_msg(msg)
-    self.check_changes(changed_paths)
-
-
-def parse_log(svn_repos, symbols):
-  """Return a dictionary of Logs, keyed on revision number, for SVN_REPOS.
-
-  Initialize the Logs' symbols with SYMBOLS."""
-
-  class LineFeeder:
-    'Make a list of lines behave like an open file handle.'
-    def __init__(self, lines):
-      self.lines = lines
-    def readline(self):
-      if len(self.lines) > 0:
-        return self.lines.pop(0)
-      else:
-        return None
+      log.changed_paths[path_portion] = op_portion
 
   def absorb_message_body(out, num_lines, log):
     'Read NUM_LINES of log message body from OUT into Log item LOG.'
@@ -318,14 +227,14 @@ def parse_log(svn_repos, symbols):
       line = line[:-1]
       m = log_start_re.match(line)
       if m:
-        this_log = Log(
-            int(m.group('rev')), m.group('author'), m.group('date'), symbols)
+        this_log = Log(int(m.group('rev')), m.group('author'),
+                       m.group('date'))
         line = out.readline()
         if not line.find('Changed paths:') == 0:
           print 'unexpected log output (missing changed paths)'
           print "Line: '%s'" % line
           sys.exit(1)
-        this_log.absorb_changed_paths(out)
+        absorb_changed_paths(out, this_log)
         absorb_message_body(out, int(m.group('lines')), this_log)
         logs[this_log.revision] = this_log
       elif len(line) == 0:
@@ -351,6 +260,15 @@ def erase(path):
     os.remove(path)
 
 
+def find_tag_rev(logs, tagname):
+  """Search LOGS for a log message containing 'TAGNAME' and return the
+  revision in which it was found."""
+  for i in xrange(len(logs), 0, -1):
+    if logs[i].msg.find("'"+tagname+"'") != -1:
+      return i
+  raise ValueError("Tag %s not found in logs" % tagname)
+
+
 def sym_log_msg(symbolic_name, is_tag=None):
   """Return the expected log message for a cvs2svn-synthesized revision
   creating branch or tag SYMBOLIC_NAME."""
@@ -372,171 +290,38 @@ def sym_log_msg(symbolic_name, is_tag=None):
   return log
 
 
-def make_conversion_id(name, args, passbypass):
-  """Create an identifying tag for a conversion.
-
-  The return value can also be used as part of a filesystem path.
-
-  NAME is the name of the CVS repository.
-
-  ARGS are the extra arguments to be passed to cvs2svn.
-
-  PASSBYPASS is a boolean indicating whether the conversion is to be
-  run one pass at a time.
-
-  The 1-to-1 mapping between cvs2svn command parameters and
-  conversion_ids allows us to avoid running the same conversion more
-  than once, when multiple tests use exactly the same conversion."""
-
-  conv_id = name
-
-  _win32_fname_mapping = { '/': '_sl_', '\\': '_bs_', ':': '_co_',
-                           '*': '_st_', '?': '_qm_', '"': '_qq_',
-                           '<': '_lt_', '>': '_gt_', '|': '_pi_', }
-  for arg in args:
-    # Replace some characters that Win32 isn't happy about having in a
-    # filename (which was causing the eol_mime test to fail).
-    sanitized_arg = arg
-    for a, b in _win32_fname_mapping.items():
-      sanitized_arg = sanitized_arg.replace(a, b)
-    conv_id = conv_id + sanitized_arg
-
-  if passbypass:
-    conv_id = conv_id + '-passbypass'
-
-  return conv_id
+def check_rev(logs, rev, msg, changed_paths):
+  """Verify the REV of LOGS has the MSG and CHANGED_PATHS specified."""
+  fail = None
+  if logs[rev].msg.find(msg) != 0:
+    print "Revision %d log message was:\n%s\n" % (rev, logs[rev].msg)
+    print "It should have begun with:\n%s\n" % (msg,)
+    fail = 1
+  if logs[rev].changed_paths != changed_paths:
+    print "Revision %d changed paths list was:\n%s\n" % (rev,
+        logs[rev].changed_paths)
+    print "It should have been:\n%s\n" % (changed_paths,)
+    fail = 1
+  if fail:
+    raise svntest.Failure
 
 
-class Conversion:
-  """A record of a cvs2svn conversion.
-
-  Fields:
-
-    conv_id -- the conversion id for this Conversion.
-
-    name -- a one-word name indicating the involved repositories.
-
-    repos -- the path to the svn repository.
-
-    logs -- a dictionary of Log instances, as returned by parse_log().
-
-    symbols -- a dictionary of symbols used for string interpolation
-        in path names.
-
-    _wc -- the basename of the svn working copy (within tmp_dir).
-
-    _wc_path -- the path to the svn working copy, if it has already
-        been created; otherwise, None.  (The working copy is created
-        lazily when get_wc() is called.)
-
-    _wc_tree -- the tree built from the svn working copy, if it has
-        already been created; otherwise, None.  The tree is created
-        lazily when get_wc_tree() is called.)
-
-    _svnrepos -- the basename of the svn repository (within tmp_dir)."""
-
-  def __init__(self, conv_id, name, error_re, passbypass, symbols, args):
-    self.conv_id = conv_id
-    self.name = name
-    self.symbols = symbols
-    if not os.path.isdir(tmp_dir):
-      os.mkdir(tmp_dir)
-
-    cvsrepos = os.path.join('..', test_data_dir, '%s-cvsrepos' % self.name)
-
-    saved_wd = os.getcwd()
-    try:
-      os.chdir(tmp_dir)
-
-      self._svnrepos = '%s-svnrepos' % self.conv_id
-      self.repos = os.path.join(tmp_dir, self._svnrepos)
-      self._wc = '%s-wc' % self.conv_id
-      self._wc_path = None
-      self._wc_tree = None
-
-      # Clean up from any previous invocations of this script.
-      erase(self._svnrepos)
-      erase(self._wc)
-
-      try:
-        args.extend( [ '--bdb-txn-nosync', '-s', self._svnrepos, cvsrepos ] )
-        if passbypass:
-          for p in range(1, 9):
-            run_cvs2svn(error_re, '-p', str(p), *args)
-        else:
-          run_cvs2svn(error_re, *args)
-      except RunProgramException:
-        raise svntest.Failure
-      except MissingErrorException:
-        raise svntest.Failure("Test failed because no error matched '%s'"
-                              % error_re)
-
-      if not os.path.isdir(self._svnrepos):
-        raise svntest.Failure("Repository not created: '%s'"
-                              % os.path.join(os.getcwd(), self._svnrepos))
-
-      self.logs = parse_log(self._svnrepos, self.symbols)
-    finally:
-      os.chdir(saved_wd)
-
-  def find_tag_log(self, tagname):
-    """Search LOGS for a log message containing 'TAGNAME' and return the
-    log in which it was found."""
-    for i in xrange(len(self.logs), 0, -1):
-      if self.logs[i].msg.find("'"+tagname+"'") != -1:
-        return self.logs[i]
-    raise ValueError("Tag %s not found in logs" % tagname)
-
-  def get_wc(self):
-    """Return the path to the svn working copy.  If it has not been
-    created yet, create it now."""
-    if self._wc_path is None:
-      saved_wd = os.getcwd()
-      try:
-        os.chdir(tmp_dir)
-        run_svn('co', repos_to_url(self._svnrepos), self._wc)
-        self._wc_path = os.path.join(tmp_dir, self._wc)
-      finally:
-        os.chdir(saved_wd)
-    return self._wc_path
-
-  def get_wc_tree(self):
-    if self._wc_tree is None:
-      self._wc_tree = svntest.tree.build_tree_from_wc(self.get_wc(), 1)
-    return self._wc_tree
-
-  def check_props(self, keys, checks):
-    """Helper function for checking lots of properties.  For a list of
-    files in the conversion, check that the values of the properties
-    listed in KEYS agree with those listed in CHECKS.  CHECKS is a
-    list of tuples: [ (filename, [value, value, ...]), ...], where the
-    values are listed in the same order as the key names are listed in
-    KEYS."""
-
-    for (file, values) in checks:
-      assert len(values) == len(keys)
-      props = props_for_path(self.get_wc_tree(), file)
-      for i in range(len(keys)):
-        if props.get(keys[i]) != values[i]:
-          raise svntest.Failure(
-              "File %s has property %s set to \"%s\" "
-              "(it should have been \"%s\").\n"
-              % (file, keys[i], props.get(keys[i]), values[i],)
-              )
-
-
-# Cache of conversions that have already been done.  Keys are conv_id;
-# values are Conversion instances.
+# List of already converted names; see the NAME argument to ensure_conversion.
+#
+# Keys are names, values are tuples: (svn_repos, svn_wc, log_dictionary).
+# The log_dictionary comes from parse_log(svn_repos).
 already_converted = { }
 
-def ensure_conversion(name, error_re=None, passbypass=None,
-                      trunk=None, branches=None, tags=None, args=None):
+def ensure_conversion(name, error_re=None, passbypass=None, *args):
   """Convert CVS repository NAME to Subversion, but only if it has not
   been converted before by this invocation of this script.  If it has
-  been converted before, return the Conversion object from the
-  previous invocation.
+  been converted before, do nothing.
 
-  If no error, return a Conversion instance.
+  If no error, return a tuple:
+
+     svn_repository_path, wc_path, log_dict
+
+  ...log_dict being the type of dictionary returned by parse_log().
 
   If ERROR_RE is a string, it is a regular expression expected to
   match some line of stderr printed by the conversion.  If there is an
@@ -552,50 +337,88 @@ def ensure_conversion(name, error_re=None, passbypass=None,
 
   Any other options to pass to cvs2svn should be in ARGS, each element
   being one option, e.g., '--trunk-only'.  If the option takes an
-  argument, include it directly, e.g., '--mime-types=PATH'.  Arguments
-  are passed to cvs2svn in the order that they appear in ARGS.
+  argument, include it directly, e.g., '--mime-types=PATH'.  The order
+  of elements in ARGS does not matter.
   """
 
-  if args is None:
-    args = []
-  else:
-    args = list(args)
+  # Identifying tag for this conversion.  This allows us to avoid
+  # running the same conversion more than once, when multiple tests
+  # use exactly the same conversion.
+  conv_id = name
 
-  if trunk is None:
-    trunk = 'trunk'
-  else:
-    args.append('--trunk=%s' % (trunk,))
+  # Convert args from tuple to list, then sort them, so we can
+  # construct a reliable conv_id.
+  args = [x for x in args]
+  args.sort()
 
-  if branches is None:
-    branches = 'branches'
-  else:
-    args.append('--branches=%s' % (branches,))
+  _win32_fname_mapping = { '/': '_sl_', '\\': '_bs_', ':': '_co_',
+                           '*': '_st_', '?': '_qm_', '"': '_qq_',
+                           '<': '_lt_', '>': '_gt_', '|': '_pi_', }
+  for arg in args:
+    # Replace some characters that Win32 isn't happy about having in a
+    # filename (which was causing the eol_mime test to fail).
+    sanitized_arg = arg
+    for a, b in _win32_fname_mapping.items():
+      sanitized_arg = sanitized_arg.replace(a, b)
+    conv_id = conv_id + sanitized_arg
 
-  if tags is None:
-    tags = 'tags'
-  else:
-    args.append('--tags=%s' % (tags,))
-
-  conv_id = make_conversion_id(name, args, passbypass)
+  if passbypass:
+    conv_id = conv_id + '-passbypass'
 
   if not already_converted.has_key(conv_id):
     try:
-      # Run the conversion and store the result for the rest of this
-      # session:
-      already_converted[conv_id] = Conversion(
-          conv_id, name, error_re, passbypass,
-          {'trunk' : trunk, 'branches' : branches, 'tags' : tags},
-          args)
+      if not os.path.isdir(tmp_dir):
+        os.mkdir(tmp_dir)
+
+      cvsrepos = os.path.abspath(os.path.join(test_data_dir,
+        '%s-cvsrepos' % name))
+
+      saved_wd = os.getcwd()
+      try:
+        os.chdir(tmp_dir)
+
+        svnrepos = '%s-svnrepos' % conv_id
+        wc       = '%s-wc' % conv_id
+
+        # Clean up from any previous invocations of this script.
+        erase(svnrepos)
+        erase(wc)
+
+        try:
+          args.extend( [ '--bdb-txn-nosync', '-s', svnrepos, cvsrepos ] )
+          if passbypass:
+            for p in range(1, 9):
+              apply(run_cvs2svn, [ error_re, '-p', str(p) ] + args)
+          else:
+            ret = apply(run_cvs2svn, [ error_re ] + args)
+        except RunProgramException:
+          raise svntest.Failure
+        except MissingErrorException:
+          print "Test failed because no error matched '%s'" % error_re
+          raise svntest.Failure
+
+        if not os.path.isdir(svnrepos):
+          print "Repository not created: '%s'" \
+                % os.path.join(os.getcwd(), svnrepos)
+          raise svntest.Failure
+
+        run_svn('co', repos_to_url(svnrepos), wc)
+        log_dict = parse_log(svnrepos)
+      finally:
+        os.chdir(saved_wd)
+
+      # This name is done for the rest of this session.
+      already_converted[conv_id] = (os.path.join('tmp', svnrepos),
+          os.path.join('tmp', wc), log_dict)
     except svntest.Failure:
       # Remember the failure so that a future attempt to run this conversion
       # does not bother to retry, but fails immediately.
       already_converted[conv_id] = None
       raise
 
-  conv = already_converted[conv_id]
-  if conv is None:
+  if already_converted[conv_id] is None:
     raise svntest.Failure
-  return conv
+  return already_converted[conv_id]
 
 
 #----------------------------------------------------------------------
@@ -612,45 +435,37 @@ def show_usage():
     print 'Exiting without running any further tests.'
     sys.exit(1)
   if out[0].find('USAGE') < 0:
-    raise svntest.Failure('Basic cvs2svn invocation failed.')
-
-
-def show_help_passes():
-  "cvs2svn --help-passes shows pass information"
-  out = run_cvs2svn(None, '--help-passes')
-  if out[0].find('PASSES') < 0:
-    raise svntest.Failure('cvs2svn --help-passes failed.')
+    print 'Basic cvs2svn invocation failed.'
+    raise svntest.Failure
 
 
 def attr_exec():
   "detection of the executable flag"
   if sys.platform == 'win32':
     raise svntest.Skip
-  conv = ensure_conversion('main')
-  st = os.stat(
-      os.path.join(conv.get_wc(), 'trunk', 'single-files', 'attr-exec'))
+  repos, wc, logs = ensure_conversion('main')
+  st = os.stat(os.path.join(wc, 'trunk', 'single-files', 'attr-exec'))
   if not st[0] & stat.S_IXUSR:
     raise svntest.Failure
 
 
 def space_fname():
   "conversion of filename with a space"
-  conv = ensure_conversion('main')
-  if not os.path.exists(
-      os.path.join(conv.get_wc(), 'trunk', 'single-files', 'space fname')):
+  repos, wc, logs = ensure_conversion('main')
+  if not os.path.exists(os.path.join(wc, 'trunk', 'single-files',
+                                     'space fname')):
     raise svntest.Failure
 
 
 def two_quick():
   "two commits in quick succession"
-  conv = ensure_conversion('main')
-  logs = parse_log(
-      os.path.join(conv.repos, 'trunk', 'single-files', 'twoquick'), {})
-  if len(logs) != 2:
+  repos, wc, logs = ensure_conversion('main')
+  logs2 = parse_log(os.path.join(repos, 'trunk', 'single-files', 'twoquick'))
+  if len(logs2) != 2:
     raise svntest.Failure
 
 
-def prune_with_care(**kw):
+def prune_with_care():
   "prune, but never too much"
   # Robert Pluim encountered this lovely one while converting the
   # directory src/gnu/usr.bin/cvs/contrib/pcl-cvs/ in FreeBSD's CVS
@@ -685,7 +500,7 @@ def prune_with_care(**kw):
   # In the test below, 'trunk/full-prune/first' represents
   # cookie, and 'trunk/full-prune/second' represents NEWS.
 
-  conv = ensure_conversion('main', **kw)
+  repos, wc, logs = ensure_conversion('main')
 
   # Confirm that revision 4 removes '/trunk/full-prune/first',
   # and that revision 6 removes '/trunk/full-prune'.
@@ -700,348 +515,343 @@ def prune_with_care(**kw):
   # and second.
 
   rev = 11
-  for path in ('/%(trunk)s/full-prune/first',
-               '/%(trunk)s/full-prune-reappear/sub/first',
-               '/%(trunk)s/partial-prune/sub/first'):
-    conv.logs[rev].check_change(path, 'D')
+  for path in ('/trunk/full-prune/first',
+               '/trunk/full-prune-reappear/sub/first',
+               '/trunk/partial-prune/sub/first'):
+    if not (logs[rev].changed_paths.get(path) == 'D'):
+      print "Revision %d failed to remove '%s'." % (rev, path)
+      raise svntest.Failure
 
   rev = 13
-  for path in ('/%(trunk)s/full-prune',
-               '/%(trunk)s/full-prune-reappear',
-               '/%(trunk)s/partial-prune/sub'):
-    conv.logs[rev].check_change(path, 'D')
+  for path in ('/trunk/full-prune',
+               '/trunk/full-prune-reappear',
+               '/trunk/partial-prune/sub'):
+    if not (logs[rev].changed_paths.get(path) == 'D'):
+      print "Revision %d failed to remove '%s'." % (rev, path)
+      raise svntest.Failure
 
   rev = 47
-  for path in ('/%(trunk)s/full-prune-reappear',
-               '/%(trunk)s/full-prune-reappear/appears-later'):
-    conv.logs[rev].check_change(path, 'A')
-
-
-def prune_with_care_variants():
-  "prune, with alternate repo layout"
-  prune_with_care(trunk='a', branches='b', tags='c')
-  prune_with_care(trunk='a/1', branches='b/1', tags='c/1')
-  prune_with_care(trunk='a/1', branches='a/2', tags='a/3')
+  for path in ('/trunk/full-prune-reappear',
+               '/trunk/full-prune-reappear/appears-later'):
+    if not (logs[rev].changed_paths.get(path) == 'A'):
+      print "Revision %d failed to create path '%s'." % (rev, path)
+      raise svntest.Failure
 
 
 def interleaved_commits():
   "two interleaved trunk commits, different log msgs"
   # See test-data/main-cvsrepos/proj/README.
-  conv = ensure_conversion('main')
+  repos, wc, logs = ensure_conversion('main')
 
   # The initial import.
   rev = 37
-  conv.logs[rev].check('Initial revision', (
-    ('/%(trunk)s/interleaved', 'A'),
-    ('/%(trunk)s/interleaved/1', 'A'),
-    ('/%(trunk)s/interleaved/2', 'A'),
-    ('/%(trunk)s/interleaved/3', 'A'),
-    ('/%(trunk)s/interleaved/4', 'A'),
-    ('/%(trunk)s/interleaved/5', 'A'),
-    ('/%(trunk)s/interleaved/a', 'A'),
-    ('/%(trunk)s/interleaved/b', 'A'),
-    ('/%(trunk)s/interleaved/c', 'A'),
-    ('/%(trunk)s/interleaved/d', 'A'),
-    ('/%(trunk)s/interleaved/e', 'A'),
-    ))
+  for path in ('/trunk/interleaved',
+               '/trunk/interleaved/1',
+               '/trunk/interleaved/2',
+               '/trunk/interleaved/3',
+               '/trunk/interleaved/4',
+               '/trunk/interleaved/5',
+               '/trunk/interleaved/a',
+               '/trunk/interleaved/b',
+               '/trunk/interleaved/c',
+               '/trunk/interleaved/d',
+               '/trunk/interleaved/e',):
+    if not (logs[rev].changed_paths.get(path) == 'A'):
+      raise svntest.Failure
 
-  # This PEP explains why we pass the 'log' parameter to these two
+  if logs[rev].msg.find('Initial revision') != 0:
+    raise svntest.Failure
+
+  # This PEP explains why we pass the 'logs' parameter to these two
   # nested functions, instead of just inheriting it from the enclosing
-  # scope: http://www.python.org/peps/pep-0227.html
+  # scope:   http://www.python.org/peps/pep-0227.html
 
-  def check_letters(log):
-    """Check if REV is the rev where only letters were committed."""
-    log.check('Committing letters only.', (
-      ('/%(trunk)s/interleaved/a', 'M'),
-      ('/%(trunk)s/interleaved/b', 'M'),
-      ('/%(trunk)s/interleaved/c', 'M'),
-      ('/%(trunk)s/interleaved/d', 'M'),
-      ('/%(trunk)s/interleaved/e', 'M'),
-      ))
+  def check_letters(rev, logs):
+    'Return 1 if REV is the rev where only letters were committed, else None.'
+    for path in ('/trunk/interleaved/a',
+                 '/trunk/interleaved/b',
+                 '/trunk/interleaved/c',
+                 '/trunk/interleaved/d',
+                 '/trunk/interleaved/e',):
+      if not (logs[rev].changed_paths.get(path) == 'M'):
+        return None
+    if logs[rev].msg.find('Committing letters only.') != 0:
+      return None
+    return 1
 
-  def check_numbers(log):
-    """Check if REV is the rev where only numbers were committed."""
-    log.check('Committing numbers only.', (
-      ('/%(trunk)s/interleaved/1', 'M'),
-      ('/%(trunk)s/interleaved/2', 'M'),
-      ('/%(trunk)s/interleaved/3', 'M'),
-      ('/%(trunk)s/interleaved/4', 'M'),
-      ('/%(trunk)s/interleaved/5', 'M'),
-      ))
+  def check_numbers(rev, logs):
+    'Return 1 if REV is the rev where only numbers were committed, else None.'
+    for path in ('/trunk/interleaved/1',
+                 '/trunk/interleaved/2',
+                 '/trunk/interleaved/3',
+                 '/trunk/interleaved/4',
+                 '/trunk/interleaved/5',):
+      if not (logs[rev].changed_paths.get(path) == 'M'):
+        return None
+    if logs[rev].msg.find('Committing numbers only.') != 0:
+      return None
+    return 1
 
   # One of the commits was letters only, the other was numbers only.
   # But they happened "simultaneously", so we don't assume anything
-  # about which commit appeared first, so we just try both ways.
+  # about which commit appeared first, we just try both ways.
   rev = rev + 3
-  try:
-    check_letters(conv.logs[rev])
-    check_numbers(conv.logs[rev + 1])
-  except svntest.Failure:
-    check_numbers(conv.logs[rev])
-    check_letters(conv.logs[rev + 1])
+  if not ((check_letters(rev, logs) and check_numbers(rev + 1, logs))
+          or (check_numbers(rev, logs) and check_letters(rev + 1, logs))):
+    raise svntest.Failure
 
 
 def simple_commits():
   "simple trunk commits"
   # See test-data/main-cvsrepos/proj/README.
-  conv = ensure_conversion('main')
+  repos, wc, logs = ensure_conversion('main')
 
   # The initial import.
   rev = 23
-  conv.logs[rev].check('Initial revision', (
-    ('/%(trunk)s/proj', 'A'),
-    ('/%(trunk)s/proj/default', 'A'),
-    ('/%(trunk)s/proj/sub1', 'A'),
-    ('/%(trunk)s/proj/sub1/default', 'A'),
-    ('/%(trunk)s/proj/sub1/subsubA', 'A'),
-    ('/%(trunk)s/proj/sub1/subsubA/default', 'A'),
-    ('/%(trunk)s/proj/sub1/subsubB', 'A'),
-    ('/%(trunk)s/proj/sub1/subsubB/default', 'A'),
-    ('/%(trunk)s/proj/sub2', 'A'),
-    ('/%(trunk)s/proj/sub2/default', 'A'),
-    ('/%(trunk)s/proj/sub2/subsubA', 'A'),
-    ('/%(trunk)s/proj/sub2/subsubA/default', 'A'),
-    ('/%(trunk)s/proj/sub3', 'A'),
-    ('/%(trunk)s/proj/sub3/default', 'A'),
-    ))
+  if not logs[rev].changed_paths == {
+    '/trunk/proj': 'A',
+    '/trunk/proj/default': 'A',
+    '/trunk/proj/sub1': 'A',
+    '/trunk/proj/sub1/default': 'A',
+    '/trunk/proj/sub1/subsubA': 'A',
+    '/trunk/proj/sub1/subsubA/default': 'A',
+    '/trunk/proj/sub1/subsubB': 'A',
+    '/trunk/proj/sub1/subsubB/default': 'A',
+    '/trunk/proj/sub2': 'A',
+    '/trunk/proj/sub2/default': 'A',
+    '/trunk/proj/sub2/subsubA': 'A',
+    '/trunk/proj/sub2/subsubA/default': 'A',
+    '/trunk/proj/sub3': 'A',
+    '/trunk/proj/sub3/default': 'A',
+    }:
+    raise svntest.Failure
+
+  if logs[rev].msg.find('Initial revision') != 0:
+    raise svntest.Failure
 
   # The first commit.
   rev = 30
-  conv.logs[rev].check('First commit to proj, affecting two files.', (
-    ('/%(trunk)s/proj/sub1/subsubA/default', 'M'),
-    ('/%(trunk)s/proj/sub3/default', 'M'),
-    ))
+  if not logs[rev].changed_paths == {
+    '/trunk/proj/sub1/subsubA/default': 'M',
+    '/trunk/proj/sub3/default': 'M',
+    }:
+    raise svntest.Failure
+
+  if logs[rev].msg.find('First commit to proj, affecting two files.') != 0:
+    raise svntest.Failure
 
   # The second commit.
   rev = 31
-  conv.logs[rev].check('Second commit to proj, affecting all 7 files.', (
-    ('/%(trunk)s/proj/default', 'M'),
-    ('/%(trunk)s/proj/sub1/default', 'M'),
-    ('/%(trunk)s/proj/sub1/subsubA/default', 'M'),
-    ('/%(trunk)s/proj/sub1/subsubB/default', 'M'),
-    ('/%(trunk)s/proj/sub2/default', 'M'),
-    ('/%(trunk)s/proj/sub2/subsubA/default', 'M'),
-    ('/%(trunk)s/proj/sub3/default', 'M')
-    ))
+  if not logs[rev].changed_paths == {
+    '/trunk/proj/default': 'M',
+    '/trunk/proj/sub1/default': 'M',
+    '/trunk/proj/sub1/subsubA/default': 'M',
+    '/trunk/proj/sub1/subsubB/default': 'M',
+    '/trunk/proj/sub2/default': 'M',
+    '/trunk/proj/sub2/subsubA/default': 'M',
+    '/trunk/proj/sub3/default': 'M'
+    }:
+    raise svntest.Failure
+
+  if logs[rev].msg.find('Second commit to proj, affecting all 7 files.') != 0:
+    raise svntest.Failure
 
 
-def simple_tags(**kw):
+def simple_tags():
   "simple tags and branches with no commits"
   # See test-data/main-cvsrepos/proj/README.
-  conv = ensure_conversion('main', **kw)
+  repos, wc, logs = ensure_conversion('main')
 
   # Verify the copy source for the tags we are about to check
   # No need to verify the copyfrom revision, as simple_commits did that
-  conv.logs[24].check(sym_log_msg('vendorbranch'), (
-    ('/%(branches)s/vendorbranch/proj (from /%(trunk)s/proj:23)', 'A'),
-    ))
+  check_rev(logs, 24, sym_log_msg('vendorbranch'), {
+    '/branches/vendorbranch/proj (from /trunk/proj:23)': 'A',
+    })
 
-  fromstr = ' (from /%(branches)s/vendorbranch:25)'
+  fromstr = ' (from /branches/vendorbranch:25)'
 
   # Tag on rev 1.1.1.1 of all files in proj
-  log = conv.find_tag_log('T_ALL_INITIAL_FILES')
-  log.check(sym_log_msg('T_ALL_INITIAL_FILES',1), (
-    ('/%(tags)s/T_ALL_INITIAL_FILES'+fromstr, 'A'),
-    ('/%(tags)s/T_ALL_INITIAL_FILES/single-files', 'D'),
-    ('/%(tags)s/T_ALL_INITIAL_FILES/partial-prune', 'D'),
-    ))
+  rev = find_tag_rev(logs, 'T_ALL_INITIAL_FILES')
+  check_rev(logs, rev, sym_log_msg('T_ALL_INITIAL_FILES',1), {
+    '/tags/T_ALL_INITIAL_FILES'+fromstr: 'A',
+    '/tags/T_ALL_INITIAL_FILES/single-files': 'D',
+    '/tags/T_ALL_INITIAL_FILES/partial-prune': 'D',
+    })
 
   # The same, as a branch
-  conv.logs[26].check(sym_log_msg('B_FROM_INITIALS'), (
-    ('/%(branches)s/B_FROM_INITIALS'+fromstr, 'A'),
-    ('/%(branches)s/B_FROM_INITIALS/single-files', 'D'),
-    ('/%(branches)s/B_FROM_INITIALS/partial-prune', 'D'),
-    ))
+  check_rev(logs, 26, sym_log_msg('B_FROM_INITIALS'), {
+    '/branches/B_FROM_INITIALS'+fromstr: 'A',
+    '/branches/B_FROM_INITIALS/single-files': 'D',
+    '/branches/B_FROM_INITIALS/partial-prune': 'D',
+    })
 
   # Tag on rev 1.1.1.1 of all files in proj, except one
-  log = conv.find_tag_log('T_ALL_INITIAL_FILES_BUT_ONE')
-  log.check(sym_log_msg('T_ALL_INITIAL_FILES_BUT_ONE',1), (
-    ('/%(tags)s/T_ALL_INITIAL_FILES_BUT_ONE'+fromstr, 'A'),
-    ('/%(tags)s/T_ALL_INITIAL_FILES_BUT_ONE/single-files', 'D'),
-    ('/%(tags)s/T_ALL_INITIAL_FILES_BUT_ONE/partial-prune', 'D'),
-    ('/%(tags)s/T_ALL_INITIAL_FILES_BUT_ONE/proj/sub1/subsubB', 'D'),
-    ))
+  rev = find_tag_rev(logs, 'T_ALL_INITIAL_FILES_BUT_ONE')
+  check_rev(logs, rev, sym_log_msg('T_ALL_INITIAL_FILES_BUT_ONE',1), {
+    '/tags/T_ALL_INITIAL_FILES_BUT_ONE'+fromstr: 'A',
+    '/tags/T_ALL_INITIAL_FILES_BUT_ONE/single-files': 'D',
+    '/tags/T_ALL_INITIAL_FILES_BUT_ONE/partial-prune': 'D',
+    '/tags/T_ALL_INITIAL_FILES_BUT_ONE/proj/sub1/subsubB': 'D',
+    })
 
   # The same, as a branch
-  conv.logs[27].check(sym_log_msg('B_FROM_INITIALS_BUT_ONE'), (
-    ('/%(branches)s/B_FROM_INITIALS_BUT_ONE'+fromstr, 'A'),
-    ('/%(branches)s/B_FROM_INITIALS_BUT_ONE/single-files', 'D'),
-    ('/%(branches)s/B_FROM_INITIALS_BUT_ONE/partial-prune', 'D'),
-    ('/%(branches)s/B_FROM_INITIALS_BUT_ONE/proj/sub1/subsubB', 'D'),
-    ))
-
-
-def simple_tags_variants():
-  "simple tags, with alternate repo layout"
-  simple_tags(trunk='a', branches='b', tags='c')
-  simple_tags(trunk='a/1', branches='b/1', tags='c/1')
-  simple_tags(trunk='a/1', branches='a/2', tags='a/3')
+  check_rev(logs, 27, sym_log_msg('B_FROM_INITIALS_BUT_ONE'), {
+    '/branches/B_FROM_INITIALS_BUT_ONE'+fromstr: 'A',
+    '/branches/B_FROM_INITIALS_BUT_ONE/single-files': 'D',
+    '/branches/B_FROM_INITIALS_BUT_ONE/partial-prune': 'D',
+    '/branches/B_FROM_INITIALS_BUT_ONE/proj/sub1/subsubB': 'D',
+    })
 
 
 def simple_branch_commits():
   "simple branch commits"
   # See test-data/main-cvsrepos/proj/README.
-  conv = ensure_conversion('main')
+  repos, wc, logs = ensure_conversion('main')
 
   rev = 35
-  conv.logs[rev].check('Modify three files, on branch B_MIXED.', (
-    ('/%(branches)s/B_MIXED/proj/default', 'M'),
-    ('/%(branches)s/B_MIXED/proj/sub1/default', 'M'),
-    ('/%(branches)s/B_MIXED/proj/sub2/subsubA/default', 'M'),
-    ))
+  if not logs[rev].changed_paths == {
+    '/branches/B_MIXED/proj/default': 'M',
+    '/branches/B_MIXED/proj/sub1/default': 'M',
+    '/branches/B_MIXED/proj/sub2/subsubA/default': 'M',
+    }:
+    raise svntest.Failure
+
+  if logs[rev].msg.find('Modify three files, on branch B_MIXED.') != 0:
+    raise svntest.Failure
 
 
 def mixed_time_tag():
   "mixed-time tag"
   # See test-data/main-cvsrepos/proj/README.
-  conv = ensure_conversion('main')
+  repos, wc, logs = ensure_conversion('main')
 
-  log = conv.find_tag_log('T_MIXED')
-  expected = (
-    ('/%(tags)s/T_MIXED (from /%(trunk)s:31)', 'A'),
-    ('/%(tags)s/T_MIXED/partial-prune', 'D'),
-    ('/%(tags)s/T_MIXED/single-files', 'D'),
-    ('/%(tags)s/T_MIXED/proj/sub2/subsubA '
-    '(from /%(trunk)s/proj/sub2/subsubA:23)', 'R'),
-    ('/%(tags)s/T_MIXED/proj/sub3 (from /%(trunk)s/proj/sub3:30)', 'R'),
-    )
-  if log.revision == 16:
-    expected.append(('/%(tags)s', 'A'))
-  log.check_changes(expected)
+  rev = find_tag_rev(logs, 'T_MIXED')
+  expected = {
+    '/tags/T_MIXED (from /trunk:31)': 'A',
+    '/tags/T_MIXED/partial-prune': 'D',
+    '/tags/T_MIXED/single-files': 'D',
+    '/tags/T_MIXED/proj/sub2/subsubA (from /trunk/proj/sub2/subsubA:23)': 'R',
+    '/tags/T_MIXED/proj/sub3 (from /trunk/proj/sub3:30)': 'R',
+    }
+  if rev == 16:
+    expected['/tags'] = 'A'
+  if not logs[rev].changed_paths == expected:
+    raise svntest.Failure
 
 
 def mixed_time_branch_with_added_file():
   "mixed-time branch, and a file added to the branch"
   # See test-data/main-cvsrepos/proj/README.
-  conv = ensure_conversion('main')
+  repos, wc, logs = ensure_conversion('main')
 
   # A branch from the same place as T_MIXED in the previous test,
   # plus a file added directly to the branch
-  conv.logs[32].check(sym_log_msg('B_MIXED'), (
-    ('/%(branches)s/B_MIXED (from /%(trunk)s:31)', 'A'),
-    ('/%(branches)s/B_MIXED/partial-prune', 'D'),
-    ('/%(branches)s/B_MIXED/single-files', 'D'),
-    ('/%(branches)s/B_MIXED/proj/sub2/subsubA '
-     '(from /%(trunk)s/proj/sub2/subsubA:23)', 'R'),
-    ('/%(branches)s/B_MIXED/proj/sub3 (from /%(trunk)s/proj/sub3:30)', 'R'),
-    ))
+  check_rev(logs, 32, sym_log_msg('B_MIXED'), {
+    '/branches/B_MIXED (from /trunk:31)': 'A',
+    '/branches/B_MIXED/partial-prune': 'D',
+    '/branches/B_MIXED/single-files': 'D',
+    '/branches/B_MIXED/proj/sub2/subsubA (from /trunk/proj/sub2/subsubA:23)':
+      'R',
+    '/branches/B_MIXED/proj/sub3 (from /trunk/proj/sub3:30)': 'R',
+    })
 
-  conv.logs[34].check('Add a file on branch B_MIXED.', (
-    ('/%(branches)s/B_MIXED/proj/sub2/branch_B_MIXED_only', 'A'),
-    ))
+  check_rev(logs, 34, 'Add a file on branch B_MIXED.', {
+    '/branches/B_MIXED/proj/sub2/branch_B_MIXED_only': 'A',
+    })
 
 
 def mixed_commit():
   "a commit affecting both trunk and a branch"
   # See test-data/main-cvsrepos/proj/README.
-  conv = ensure_conversion('main')
+  repos, wc, logs = ensure_conversion('main')
 
-  conv.logs[36].check(
-      'A single commit affecting one file on branch B_MIXED '
-      'and one on trunk.', (
-    ('/%(trunk)s/proj/sub2/default', 'M'),
-    ('/%(branches)s/B_MIXED/proj/sub2/branch_B_MIXED_only', 'M'),
-    ))
+  check_rev(logs, 36, 'A single commit affecting one file on branch B_MIXED '
+      'and one on trunk.', {
+    '/trunk/proj/sub2/default': 'M',
+    '/branches/B_MIXED/proj/sub2/branch_B_MIXED_only': 'M',
+    })
 
 
 def split_time_branch():
   "branch some trunk files, and later branch the rest"
   # See test-data/main-cvsrepos/proj/README.
-  conv = ensure_conversion('main')
+  repos, wc, logs = ensure_conversion('main')
 
   rev = 42
   # First change on the branch, creating it
-  conv.logs[rev].check(sym_log_msg('B_SPLIT'), (
-    ('/%(branches)s/B_SPLIT (from /%(trunk)s:36)', 'A'),
-    ('/%(branches)s/B_SPLIT/partial-prune', 'D'),
-    ('/%(branches)s/B_SPLIT/single-files', 'D'),
-    ('/%(branches)s/B_SPLIT/proj/sub1/subsubB', 'D'),
-    ))
+  check_rev(logs, rev, sym_log_msg('B_SPLIT'), {
+    '/branches/B_SPLIT (from /trunk:36)': 'A',
+    '/branches/B_SPLIT/partial-prune': 'D',
+    '/branches/B_SPLIT/single-files': 'D',
+    '/branches/B_SPLIT/proj/sub1/subsubB': 'D',
+    })
 
-  conv.logs[rev + 1].check('First change on branch B_SPLIT.', (
-    ('/%(branches)s/B_SPLIT/proj/default', 'M'),
-    ('/%(branches)s/B_SPLIT/proj/sub1/default', 'M'),
-    ('/%(branches)s/B_SPLIT/proj/sub1/subsubA/default', 'M'),
-    ('/%(branches)s/B_SPLIT/proj/sub2/default', 'M'),
-    ('/%(branches)s/B_SPLIT/proj/sub2/subsubA/default', 'M'),
-    ))
+  check_rev(logs, rev + 1, 'First change on branch B_SPLIT.', {
+    '/branches/B_SPLIT/proj/default': 'M',
+    '/branches/B_SPLIT/proj/sub1/default': 'M',
+    '/branches/B_SPLIT/proj/sub1/subsubA/default': 'M',
+    '/branches/B_SPLIT/proj/sub2/default': 'M',
+    '/branches/B_SPLIT/proj/sub2/subsubA/default': 'M',
+    })
 
   # A trunk commit for the file which was not branched
-  conv.logs[rev + 2].check('A trunk change to sub1/subsubB/default.  '
-      'This was committed about an', (
-    ('/%(trunk)s/proj/sub1/subsubB/default', 'M'),
-    ))
+  check_rev(logs, rev + 2, 'A trunk change to sub1/subsubB/default.  '
+      'This was committed about an', {
+    '/trunk/proj/sub1/subsubB/default': 'M',
+    })
 
   # Add the file not already branched to the branch, with modification:w
-  conv.logs[rev + 3].check(sym_log_msg('B_SPLIT'), (
-    ('/%(branches)s/B_SPLIT/proj/sub1/subsubB '
-    '(from /%(trunk)s/proj/sub1/subsubB:44)', 'A'),
-    ))
+  check_rev(logs, rev + 3, sym_log_msg('B_SPLIT'), {
+    '/branches/B_SPLIT/proj/sub1/subsubB (from /trunk/proj/sub1/subsubB:44)':
+    'A',
+    })
 
-  conv.logs[rev + 4].check('This change affects sub3/default and '
-      'sub1/subsubB/default, on branch', (
-    ('/%(branches)s/B_SPLIT/proj/sub1/subsubB/default', 'M'),
-    ('/%(branches)s/B_SPLIT/proj/sub3/default', 'M'),
-    ))
+  check_rev(logs, rev + 4, 'This change affects sub3/default and '
+      'sub1/subsubB/default, on branch', {
+    '/branches/B_SPLIT/proj/sub1/subsubB/default': 'M',
+    '/branches/B_SPLIT/proj/sub3/default': 'M',
+    })
 
-
-def multiple_tags():
-  "multiple tags referring to same revision"
-  conv = ensure_conversion('main')
-  if not os.path.exists(
-      os.path.join(
-          conv.get_wc(), 'tags', 'T_ALL_INITIAL_FILES', 'proj', 'default'
-          )
-      ):
-    raise svntest.Failure
-  if not os.path.exists(
-      os.path.join(
-          conv.get_wc(), 'tags', 'T_ALL_INITIAL_FILES_BUT_ONE', 'proj', 'default'
-          )
-      ):
-    raise svntest.Failure
 
 def bogus_tag():
   "conversion of invalid symbolic names"
-  conv = ensure_conversion('bogus-tag')
+  ret, ign, ign = ensure_conversion('bogus-tag')
 
 
 def overlapping_branch():
   "ignore a file with a branch with two names"
-  conv = ensure_conversion('overlapping-branch',
-                           error_re='.*cannot also have name \'vendorB\'')
+  repos, wc, logs = ensure_conversion('overlapping-branch',
+                                      '.*cannot also have name \'vendorB\'')
+  nonlap_path = '/trunk/nonoverlapping-branch'
+  lap_path = '/trunk/overlapping-branch'
   rev = 4
-  conv.logs[rev].check_change('/%(branches)s/vendorA (from /%(trunk)s:3)',
-                              'A')
+  if not (logs[rev].changed_paths.get('/branches/vendorA (from /trunk:3)')
+          == 'A'):
+    raise svntest.Failure
   # We don't know what order the first two commits would be in, since
   # they have different log messages but the same timestamps.  As only
   # one of the files would be on the vendorB branch in the regression
   # case being tested here, we allow for either order.
-  if (conv.logs[rev].get_path_op(
-          '/%(branches)s/vendorB (from /%(trunk)s:2)') == 'A'
-      or conv.logs[rev].get_path_op(
-             '/%(branches)s/vendorB (from /%(trunk)s:3)') == 'A'):
+  if ((logs[rev].changed_paths.get('/branches/vendorB (from /trunk:2)')
+       == 'A')
+      or (logs[rev].changed_paths.get('/branches/vendorB (from /trunk:3)')
+          == 'A')):
     raise svntest.Failure
-  conv.logs[rev + 1].check_changes(())
-  if len(conv.logs) != rev + 1:
+  if not logs[rev + 1].changed_paths == {}:
+    raise svntest.Failure
+  if len(logs) != rev + 1:
     raise svntest.Failure
 
 
-def phoenix_branch(**kw):
+def phoenix_branch():
   "convert a branch file rooted in a 'dead' revision"
-  conv = ensure_conversion('phoenix', **kw)
-  conv.logs[8].check(sym_log_msg('volsung_20010721'), (
-    ('/%(branches)s/volsung_20010721 (from /%(trunk)s:7)', 'A'),
-    ('/%(branches)s/volsung_20010721/file.txt', 'D'),
-    ))
-  conv.logs[9].check('This file was supplied by Jack Moffitt', (
-    ('/%(branches)s/volsung_20010721/phoenix', 'A'),
-    ))
-
-
-def phoenix_branch_variants():
-  "'dead' revision, with alternate repo layout"
-  phoenix_branch(trunk='a/1', branches='b/1', tags='c/1')
+  repos, wc, logs = ensure_conversion('phoenix')
+  check_rev(logs, 8, sym_log_msg('volsung_20010721'), {
+    '/branches/volsung_20010721 (from /trunk:7)': 'A',
+    '/branches/volsung_20010721/file.txt' : 'D'
+    })
+  check_rev(logs, 9, 'This file was supplied by Jack Moffitt', {
+    '/branches/volsung_20010721/phoenix': 'A' })
 
 
 ###TODO: We check for 4 changed paths here to accomodate creating tags
@@ -1051,34 +861,30 @@ def ctrl_char_in_log():
   "handle a control char in a log message"
   # This was issue #1106.
   rev = 2
-  conv = ensure_conversion('ctrl-char-in-log')
-  conv.logs[rev].check_changes((
-    ('/%(trunk)s/ctrl-char-in-log', 'A'),
-    ))
-  if conv.logs[rev].msg.find('\x04') < 0:
-    raise svntest.Failure(
-        "Log message of 'ctrl-char-in-log,v' (rev 2) is wrong.")
+  repos, wc, logs = ensure_conversion('ctrl-char-in-log')
+  if not ((logs[rev].changed_paths.get('/trunk/ctrl-char-in-log') == 'A')
+          and (len(logs[rev].changed_paths) == 1)):
+    print "Revision 2 of 'ctrl-char-in-log,v' was not converted successfully."
+    raise svntest.Failure
+  if logs[rev].msg.find('\x04') < 0:
+    print "Log message of 'ctrl-char-in-log,v' (rev 2) is wrong."
+    raise svntest.Failure
 
 
 def overdead():
   "handle tags rooted in a redeleted revision"
-  conv = ensure_conversion('overdead')
+  repos, wc, logs = ensure_conversion('overdead')
 
 
-def no_trunk_prune(**kw):
+def no_trunk_prune():
   "ensure that trunk doesn't get pruned"
-  conv = ensure_conversion('overdead', **kw)
-  for rev in conv.logs.keys():
-    rev_logs = conv.logs[rev]
-    if rev_logs.get_path_op('/%(trunk)s') == 'D':
-      raise svntest.Failure
-
-
-def no_trunk_prune_variants():
-  "no trunk pruning, with alternate repo layout"
-  no_trunk_prune(trunk='a', branches='b', tags='c')
-  no_trunk_prune(trunk='a/1', branches='b/1', tags='c/1')
-  no_trunk_prune(trunk='a/1', branches='a/2', tags='a/3')
+  repos, wc, logs = ensure_conversion('overdead')
+  for rev in logs.keys():
+    rev_logs = logs[rev]
+    for changed_path in rev_logs.changed_paths.keys():
+      if changed_path == '/trunk' \
+         and rev_logs.changed_paths[changed_path] == 'D':
+        raise svntest.Failure
 
 
 def double_delete():
@@ -1088,18 +894,24 @@ def double_delete():
   # handle a file in the root of the repository (there were some
   # bugs in cvs2svn's svn path construction for top-level files); and
   # the --no-prune option.
-  conv = ensure_conversion(
-    'double-delete', args=['--trunk-only', '--no-prune'])
+  repos, wc, logs = ensure_conversion('double-delete', None, None,
+                                      '--trunk-only' , '--no-prune')
 
-  path = '/%(trunk)s/twice-removed'
+  path = '/trunk/twice-removed'
   rev = 2
-  conv.logs[rev].check_change(path, 'A')
-  conv.logs[rev].check_msg('Initial revision')
+  if not (logs[rev].changed_paths.get(path) == 'A'):
+    raise svntest.Failure
 
-  conv.logs[rev + 1].check_change(path, 'D')
-  conv.logs[rev + 1].check_msg('Remove this file for the first time.')
+  if logs[rev].msg.find('Initial revision') != 0:
+    raise svntest.Failure
 
-  if conv.logs[rev + 1].get_path_op('/%(trunk)s') is not None:
+  if not (logs[rev + 1].changed_paths.get(path) == 'D'):
+    raise svntest.Failure
+
+  if logs[rev + 1].msg.find('Remove this file for the first time.') != 0:
+    raise svntest.Failure
+
+  if logs[rev + 1].changed_paths.has_key('/trunk'):
     raise svntest.Failure
 
 
@@ -1108,8 +920,8 @@ def split_branch():
   # See test-data/split-branch-cvsrepos/README.
   #
   # The conversion will fail if the bug is present, and
-  # ensure_conversion will raise svntest.Failure.
-  conv = ensure_conversion('split-branch')
+  # ensure_conversion would raise svntest.Failure.
+  repos, wc, logs = ensure_conversion('split-branch')
 
 
 def resync_misgroups():
@@ -1117,18 +929,15 @@ def resync_misgroups():
   # See test-data/resync-misgroups-cvsrepos/README.
   #
   # The conversion will fail if the bug is present, and
-  # ensure_conversion will raise svntest.Failure.
-  conv = ensure_conversion('resync-misgroups')
+  # ensure_conversion would raise svntest.Failure.
+  repos, wc, logs = ensure_conversion('resync-misgroups')
 
 
-def tagged_branch_and_trunk(**kw):
+def tagged_branch_and_trunk():
   "allow tags with mixed trunk and branch sources"
-  conv = ensure_conversion('tagged-branch-n-trunk', **kw)
-
-  tags = kw.get('tags', 'tags')
-
-  a_path = os.path.join(conv.get_wc(), tags, 'some-tag', 'a.txt')
-  b_path = os.path.join(conv.get_wc(), tags, 'some-tag', 'b.txt')
+  repos, wc, logs = ensure_conversion('tagged-branch-n-trunk')
+  a_path = os.path.join(wc, 'tags', 'some-tag', 'a.txt')
+  b_path = os.path.join(wc, 'tags', 'some-tag', 'b.txt')
   if not (os.path.exists(a_path) and os.path.exists(b_path)):
     raise svntest.Failure
   if (open(a_path, 'r').read().find('1.24') == -1) \
@@ -1136,61 +945,48 @@ def tagged_branch_and_trunk(**kw):
     raise svntest.Failure
 
 
-def tagged_branch_and_trunk_variants():
-  "mixed tags, with alternate repo layout"
-  tagged_branch_and_trunk(trunk='a/1', branches='a/2', tags='a/3')
-
-
 def enroot_race():
   "never use the rev-in-progress as a copy source"
   # See issue #1427 and r8544.
-  conv = ensure_conversion('enroot-race')
+  repos, wc, logs = ensure_conversion('enroot-race')
   rev = 8
-  conv.logs[rev].check_changes((
-    ('/%(branches)s/mybranch (from /%(trunk)s:7)', 'A'),
-    ('/%(branches)s/mybranch/proj/a.txt', 'D'),
-    ('/%(branches)s/mybranch/proj/b.txt', 'D'),
-    ))
-  conv.logs[rev + 1].check_changes((
-    ('/%(branches)s/mybranch/proj/c.txt', 'M'),
-    ('/%(trunk)s/proj/a.txt', 'M'),
-    ('/%(trunk)s/proj/b.txt', 'M'),
-    ))
+  if not logs[rev].changed_paths == {
+    '/branches/mybranch (from /trunk:7)': 'A',
+    '/branches/mybranch/proj/a.txt': 'D',
+    '/branches/mybranch/proj/b.txt': 'D',
+    }:
+    raise svntest.Failure
+  if not logs[rev + 1].changed_paths == {
+    '/branches/mybranch/proj/c.txt': 'M',
+    '/trunk/proj/a.txt': 'M',
+    '/trunk/proj/b.txt': 'M',
+    }:
+    raise svntest.Failure
 
 
 def enroot_race_obo():
   "do use the last completed rev as a copy source"
-  conv = ensure_conversion('enroot-race-obo')
-  conv.logs[3].check_change('/%(branches)s/BRANCH (from /%(trunk)s:2)', 'A')
-  if not len(conv.logs) == 3:
+  repos, wc, logs = ensure_conversion('enroot-race-obo')
+  if not ((len(logs) == 3) and
+      (logs[3].changed_paths.get('/branches/BRANCH (from /trunk:2)') == 'A')):
     raise svntest.Failure
 
 
-def branch_delete_first(**kw):
+def branch_delete_first():
   "correctly handle deletion as initial branch action"
   # See test-data/branch-delete-first-cvsrepos/README.
   #
   # The conversion will fail if the bug is present, and
   # ensure_conversion would raise svntest.Failure.
-  conv = ensure_conversion('branch-delete-first', **kw)
-
-  branches = kw.get('branches', 'branches')
+  repos, wc, logs = ensure_conversion('branch-delete-first')
 
   # 'file' was deleted from branch-1 and branch-2, but not branch-3
-  if os.path.exists(
-        os.path.join(conv.get_wc(), branches, 'branch-1', 'file')):
+  if os.path.exists(os.path.join(wc, 'branches', 'branch-1', 'file')):
     raise svntest.Failure
-  if os.path.exists(
-        os.path.join(conv.get_wc(), branches, 'branch-2', 'file')):
+  if os.path.exists(os.path.join(wc, 'branches', 'branch-2', 'file')):
     raise svntest.Failure
-  if not os.path.exists(
-        os.path.join(conv.get_wc(), branches, 'branch-3', 'file')):
+  if not os.path.exists(os.path.join(wc, 'branches', 'branch-3', 'file')):
     raise svntest.Failure
-
-
-def branch_delete_first_variants():
-  "initial delete, with alternate repo layout"
-  branch_delete_first(trunk='a/1', branches='a/2', tags='a/3')
 
 
 def nonascii_filenames():
@@ -1243,8 +1039,9 @@ def nonascii_filenames():
     raise svntest.Skip
 
   try:
-    srcrepos_path = os.path.join(test_data_dir,'main-cvsrepos')
-    dstrepos_path = os.path.join(test_data_dir,'non-ascii-cvsrepos')
+    testdata_path = os.path.abspath('test-data')
+    srcrepos_path = os.path.join(testdata_path,'main-cvsrepos')
+    dstrepos_path = os.path.join(testdata_path,'non-ascii-cvsrepos')
     if not os.path.exists(dstrepos_path):
       # create repos from existing main repos
       shutil.copytree(srcrepos_path, dstrepos_path)
@@ -1255,7 +1052,8 @@ def nonascii_filenames():
       os.rename(base_path, new_path)
 
     # if ensure_conversion can generate a
-    conv = ensure_conversion('non-ascii', args=['--encoding=latin1'])
+    repos, wc, logs = ensure_conversion('non-ascii', None, None,
+                                        '--encoding=latin1')
   finally:
     if locale_changed:
       locale.setlocale(locale.LC_ALL, current_locale)
@@ -1263,8 +1061,8 @@ def nonascii_filenames():
 
 
 def vendor_branch_sameness():
-  "avoid spurious changes for initial revs"
-  conv = ensure_conversion('vendor-branch-sameness')
+  "avoid spurious changes for initial revs "
+  repos, wc, logs = ensure_conversion('vendor-branch-sameness')
 
   # There are four files in the repository:
   #
@@ -1290,28 +1088,41 @@ def vendor_branch_sameness():
   # d.txt should be 'D'eleted.
 
   rev = 2
-  conv.logs[rev].check('Initial revision', (
-    ('/%(trunk)s/proj', 'A'),
-    ('/%(trunk)s/proj/a.txt', 'A'),
-    ('/%(trunk)s/proj/b.txt', 'A'),
-    ('/%(trunk)s/proj/c.txt', 'A'),
-    ('/%(trunk)s/proj/d.txt', 'A'),
-    ))
+  ###TODO Convert to check_rev.
+  if logs[rev].msg.find('Initial revision') != 0:
+    raise svntest.Failure
 
-  conv.logs[rev + 1].check(sym_log_msg('vbranchA'), (
-    ('/%(branches)s/vbranchA (from /%(trunk)s:2)', 'A'),
-    ('/%(branches)s/vbranchA/proj/d.txt', 'D'),
-    ))
+  if not logs[rev].changed_paths == {
+    '/trunk/proj' : 'A',
+    '/trunk/proj/a.txt' : 'A',
+    '/trunk/proj/b.txt' : 'A',
+    '/trunk/proj/c.txt' : 'A',
+    '/trunk/proj/d.txt' : 'A',
+    }:
+    raise svntest.Failure
 
-  conv.logs[rev + 2].check('First vendor branch revision.', (
-    ('/%(branches)s/vbranchA/proj/b.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/c.txt', 'D'),
-    ))
+  if logs[rev + 1].msg.find(sym_log_msg('vbranchA')) != 0:
+    raise svntest.Failure
+
+  if not logs[rev + 1].changed_paths == {
+   '/branches/vbranchA (from /trunk:2)' : 'A',
+    '/branches/vbranchA/proj/d.txt' : 'D',
+    }:
+    raise svntest.Failure
+
+  if logs[rev + 2].msg.find('First vendor branch revision.') != 0:
+    raise svntest.Failure
+
+  if not logs[rev + 2].changed_paths == {
+    '/branches/vbranchA/proj/b.txt' : 'M',
+    '/branches/vbranchA/proj/c.txt' : 'D',
+    }:
+    raise svntest.Failure
 
 
 def default_branches():
-  "handle default branches correctly"
-  conv = ensure_conversion('default-branches')
+  "handle default branches correctly "
+  repos, wc, logs = ensure_conversion('default-branches')
 
   # There are seven files in the repository:
   #
@@ -1343,223 +1154,199 @@ def default_branches():
   #       never had a default branch.
   #
 
-  conv.logs[18].check(sym_log_msg('vtag-4',1), (
-    ('/%(tags)s/vtag-4 (from /%(branches)s/vbranchA:16)', 'A'),
-    ('/%(tags)s/vtag-4/proj/d.txt '
-     '(from /%(branches)s/unlabeled-1.1.1/proj/d.txt:16)', 'A'),
-    ))
+  check_rev(logs, 18, sym_log_msg('vtag-4',1), {
+    '/tags/vtag-4 (from /branches/vbranchA:16)' : 'A',
+    '/tags/vtag-4/proj/d.txt '
+    '(from /branches/unlabeled-1.1.1/proj/d.txt:16)' : 'A',
+    })
 
-  conv.logs[6].check(sym_log_msg('vtag-1',1), (
-    ('/%(tags)s/vtag-1 (from /%(branches)s/vbranchA:5)', 'A'),
-    ('/%(tags)s/vtag-1/proj/d.txt '
-     '(from /%(branches)s/unlabeled-1.1.1/proj/d.txt:5)', 'A'),
-    ))
+  check_rev(logs, 6, sym_log_msg('vtag-1',1), {
+    '/tags/vtag-1 (from /branches/vbranchA:5)' : 'A',
+    '/tags/vtag-1/proj/d.txt '
+    '(from /branches/unlabeled-1.1.1/proj/d.txt:5)' : 'A',
+    })
 
-  conv.logs[9].check(sym_log_msg('vtag-2',1), (
-    ('/%(tags)s/vtag-2 (from /%(branches)s/vbranchA:7)', 'A'),
-    ('/%(tags)s/vtag-2/proj/d.txt '
-     '(from /%(branches)s/unlabeled-1.1.1/proj/d.txt:7)', 'A'),
-    ))
+  check_rev(logs, 9, sym_log_msg('vtag-2',1), {
+    '/tags/vtag-2 (from /branches/vbranchA:7)' : 'A',
+    '/tags/vtag-2/proj/d.txt '
+    '(from /branches/unlabeled-1.1.1/proj/d.txt:7)' : 'A',
+    })
 
-  conv.logs[12].check(sym_log_msg('vtag-3',1), (
-    ('/%(tags)s/vtag-3 (from /%(branches)s/vbranchA:10)', 'A'),
-    ('/%(tags)s/vtag-3/proj/d.txt '
-     '(from /%(branches)s/unlabeled-1.1.1/proj/d.txt:10)', 'A'),
-    ('/%(tags)s/vtag-3/proj/e.txt '
-     '(from /%(branches)s/unlabeled-1.1.1/proj/e.txt:10)', 'A'),
-    ))
+  check_rev(logs, 12, sym_log_msg('vtag-3',1), {
+    '/tags/vtag-3 (from /branches/vbranchA:10)' : 'A',
+    '/tags/vtag-3/proj/d.txt '
+    '(from /branches/unlabeled-1.1.1/proj/d.txt:10)' : 'A',
+    '/tags/vtag-3/proj/e.txt '
+    '(from /branches/unlabeled-1.1.1/proj/e.txt:10)' : 'A',
+    })
 
-  conv.logs[17].check("This commit was generated by cvs2svn "
-                      "to compensate for changes in r16,", (
-    ('/%(trunk)s/proj/b.txt '
-     '(from /%(branches)s/vbranchA/proj/b.txt:16)', 'R'),
-    ('/%(trunk)s/proj/c.txt '
-     '(from /%(branches)s/vbranchA/proj/c.txt:16)', 'R'),
-    ('/%(trunk)s/proj/d.txt '
-     '(from /%(branches)s/unlabeled-1.1.1/proj/d.txt:16)', 'R'),
-    ('/%(trunk)s/proj/deleted-on-vendor-branch.txt '
-     '(from /%(branches)s/vbranchA/proj/deleted-on-vendor-branch.txt:16)',
-     'A'),
-    ('/%(trunk)s/proj/e.txt '
-     '(from /%(branches)s/unlabeled-1.1.1/proj/e.txt:16)', 'R'),
-    ))
+  check_rev(logs, 17, "This commit was generated by cvs2svn "
+                       "to compensate for changes in r16,", {
+    '/trunk/proj/b.txt (from /branches/vbranchA/proj/b.txt:16)' : 'R',
+    '/trunk/proj/c.txt (from /branches/vbranchA/proj/c.txt:16)' : 'R',
+    '/trunk/proj/d.txt (from /branches/unlabeled-1.1.1/proj/d.txt:16)' : 'R',
+    '/trunk/proj/deleted-on-vendor-branch.txt '
+    '(from /branches/vbranchA/proj/deleted-on-vendor-branch.txt:16)' : 'A',
+    '/trunk/proj/e.txt (from /branches/unlabeled-1.1.1/proj/e.txt:16)' : 'R',
+    })
 
-  conv.logs[16].check("Import (vbranchA, vtag-4).", (
-    ('/%(branches)s/unlabeled-1.1.1/proj/d.txt', 'M'),
-    ('/%(branches)s/unlabeled-1.1.1/proj/e.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/a.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/added-then-imported.txt', 'M'), # CHECK!!!
-    ('/%(branches)s/vbranchA/proj/b.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/c.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/deleted-on-vendor-branch.txt', 'A'),
-    ))
+  check_rev(logs, 16, "Import (vbranchA, vtag-4).", {
+    '/branches/unlabeled-1.1.1/proj/d.txt' : 'M',
+    '/branches/unlabeled-1.1.1/proj/e.txt' : 'M',
+    '/branches/vbranchA/proj/a.txt' : 'M',
+    '/branches/vbranchA/proj/added-then-imported.txt': 'M', # CHECK!!!
+    '/branches/vbranchA/proj/b.txt' : 'M',
+    '/branches/vbranchA/proj/c.txt' : 'M',
+    '/branches/vbranchA/proj/deleted-on-vendor-branch.txt' : 'A',
+    })
 
-  conv.logs[15].check(sym_log_msg('vbranchA'), (
-    ('/%(branches)s/vbranchA/proj/added-then-imported.txt '
-    '(from /%(trunk)s/proj/added-then-imported.txt:14)', 'A'),
-    ))
+  check_rev(logs, 15, sym_log_msg('vbranchA'), {
+    '/branches/vbranchA/proj/added-then-imported.txt '
+    '(from /trunk/proj/added-then-imported.txt:14)' : 'A',
+    })
 
-  conv.logs[14].check("Add a file to the working copy.", (
-    ('/%(trunk)s/proj/added-then-imported.txt', 'A'),
-    ))
+  check_rev(logs, 14, "Add a file to the working copy.", {
+    '/trunk/proj/added-then-imported.txt' : 'A',
+    })
 
-  conv.logs[13].check("First regular commit, to a.txt, on vtag-3.", (
-    ('/%(trunk)s/proj/a.txt', 'M'),
-    ))
+  check_rev(logs, 13, "First regular commit, to a.txt, on vtag-3.", {
+    '/trunk/proj/a.txt' : 'M',
+    })
 
-  conv.logs[11].check("This commit was generated by cvs2svn "
-                      "to compensate for changes in r10,", (
-    ('/%(trunk)s/proj/a.txt '
-     '(from /%(branches)s/vbranchA/proj/a.txt:10)', 'R'),
-    ('/%(trunk)s/proj/b.txt '
-     '(from /%(branches)s/vbranchA/proj/b.txt:10)', 'R'),
-    ('/%(trunk)s/proj/c.txt '
-     '(from /%(branches)s/vbranchA/proj/c.txt:10)', 'R'),
-    ('/%(trunk)s/proj/d.txt '
-     '(from /%(branches)s/unlabeled-1.1.1/proj/d.txt:10)', 'R'),
-    ('/%(trunk)s/proj/deleted-on-vendor-branch.txt', 'D'),
-    ('/%(trunk)s/proj/e.txt '
-     '(from /%(branches)s/unlabeled-1.1.1/proj/e.txt:10)', 'R'),
-    ))
+  check_rev(logs, 11, "This commit was generated by cvs2svn "
+                      "to compensate for changes in r10,", {
+    '/trunk/proj/a.txt (from /branches/vbranchA/proj/a.txt:10)' : 'R',
+    '/trunk/proj/b.txt (from /branches/vbranchA/proj/b.txt:10)' : 'R',
+    '/trunk/proj/c.txt (from /branches/vbranchA/proj/c.txt:10)' : 'R',
+    '/trunk/proj/d.txt (from /branches/unlabeled-1.1.1/proj/d.txt:10)' : 'R',
+    '/trunk/proj/deleted-on-vendor-branch.txt' : 'D',
+    '/trunk/proj/e.txt (from /branches/unlabeled-1.1.1/proj/e.txt:10)' : 'R',
+    })
 
-  conv.logs[10].check("Import (vbranchA, vtag-3).", (
-    ('/%(branches)s/unlabeled-1.1.1/proj/d.txt', 'M'),
-    ('/%(branches)s/unlabeled-1.1.1/proj/e.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/a.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/b.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/c.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/deleted-on-vendor-branch.txt', 'D'),
-    ))
+  check_rev(logs, 10, "Import (vbranchA, vtag-3).", {
+    '/branches/unlabeled-1.1.1/proj/d.txt' : 'M',
+    '/branches/unlabeled-1.1.1/proj/e.txt' : 'M',
+    '/branches/vbranchA/proj/a.txt' : 'M',
+    '/branches/vbranchA/proj/b.txt' : 'M',
+    '/branches/vbranchA/proj/c.txt' : 'M',
+    '/branches/vbranchA/proj/deleted-on-vendor-branch.txt' : 'D',
+    })
 
-  conv.logs[8].check("This commit was generated by cvs2svn "
-                      "to compensate for changes in r7,", (
-    ('/%(trunk)s/proj/a.txt '
-     '(from /%(branches)s/vbranchA/proj/a.txt:7)', 'R'),
-    ('/%(trunk)s/proj/b.txt '
-     '(from /%(branches)s/vbranchA/proj/b.txt:7)', 'R'),
-    ('/%(trunk)s/proj/c.txt '
-     '(from /%(branches)s/vbranchA/proj/c.txt:7)', 'R'),
-    ('/%(trunk)s/proj/d.txt '
-     '(from /%(branches)s/unlabeled-1.1.1/proj/d.txt:7)', 'R'),
-    ('/%(trunk)s/proj/deleted-on-vendor-branch.txt '
-     '(from /%(branches)s/vbranchA/proj/deleted-on-vendor-branch.txt:7)',
-     'R'),
-    ('/%(trunk)s/proj/e.txt '
-    '(from /%(branches)s/unlabeled-1.1.1/proj/e.txt:7)', 'R'),
-    ))
+  check_rev(logs, 8, "This commit was generated by cvs2svn "
+                      "to compensate for changes in r7,", {
+    '/trunk/proj/a.txt (from /branches/vbranchA/proj/a.txt:7)' : 'R',
+    '/trunk/proj/b.txt (from /branches/vbranchA/proj/b.txt:7)' : 'R',
+    '/trunk/proj/c.txt (from /branches/vbranchA/proj/c.txt:7)' : 'R',
+    '/trunk/proj/d.txt (from /branches/unlabeled-1.1.1/proj/d.txt:7)' : 'R',
+    '/trunk/proj/deleted-on-vendor-branch.txt '
+    '(from /branches/vbranchA/proj/deleted-on-vendor-branch.txt:7)' : 'R',
+    '/trunk/proj/e.txt (from /branches/unlabeled-1.1.1/proj/e.txt:7)' : 'R',
+    })
 
-  conv.logs[7].check("Import (vbranchA, vtag-2).", (
-    ('/%(branches)s/unlabeled-1.1.1/proj/d.txt', 'M'),
-    ('/%(branches)s/unlabeled-1.1.1/proj/e.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/a.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/b.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/c.txt', 'M'),
-    ('/%(branches)s/vbranchA/proj/deleted-on-vendor-branch.txt', 'M'),
-    ))
+  check_rev(logs, 7, "Import (vbranchA, vtag-2).", {
+    '/branches/unlabeled-1.1.1/proj/d.txt' : 'M',
+    '/branches/unlabeled-1.1.1/proj/e.txt' : 'M',
+    '/branches/vbranchA/proj/a.txt' : 'M',
+    '/branches/vbranchA/proj/b.txt' : 'M',
+    '/branches/vbranchA/proj/c.txt' : 'M',
+    '/branches/vbranchA/proj/deleted-on-vendor-branch.txt' : 'M',
+    })
 
-  conv.logs[5].check("Import (vbranchA, vtag-1).", ())
+  check_rev(logs, 5, "Import (vbranchA, vtag-1).", {})
 
-  conv.logs[4].check(sym_log_msg('vbranchA'), (
-    ('/%(branches)s/vbranchA (from /%(trunk)s:2)', 'A'),
-    ('/%(branches)s/vbranchA/proj/d.txt', 'D'),
-    ('/%(branches)s/vbranchA/proj/e.txt', 'D'),
-    ))
+  check_rev(logs, 4, sym_log_msg('vbranchA'), {
+    '/branches/vbranchA (from /trunk:2)' : 'A',
+    '/branches/vbranchA/proj/d.txt' : 'D',
+    '/branches/vbranchA/proj/e.txt' : 'D',
+    })
 
-  conv.logs[3].check(sym_log_msg('unlabeled-1.1.1'), (
-    ('/%(branches)s/unlabeled-1.1.1 (from /%(trunk)s:2)', 'A'),
-    ('/%(branches)s/unlabeled-1.1.1/proj/a.txt', 'D'),
-    ('/%(branches)s/unlabeled-1.1.1/proj/b.txt', 'D'),
-    ('/%(branches)s/unlabeled-1.1.1/proj/c.txt', 'D'),
-    ('/%(branches)s/unlabeled-1.1.1/proj/deleted-on-vendor-branch.txt', 'D'),
-    ))
+  check_rev(logs, 3, sym_log_msg('unlabeled-1.1.1'), {
+    '/branches/unlabeled-1.1.1 (from /trunk:2)' : 'A',
+    '/branches/unlabeled-1.1.1/proj/a.txt' : 'D',
+    '/branches/unlabeled-1.1.1/proj/b.txt' : 'D',
+    '/branches/unlabeled-1.1.1/proj/c.txt' : 'D',
+    '/branches/unlabeled-1.1.1/proj/deleted-on-vendor-branch.txt' : 'D',
+    })
 
-  conv.logs[2].check("Initial revision", (
-    ('/%(trunk)s/proj', 'A'),
-    ('/%(trunk)s/proj/a.txt', 'A'),
-    ('/%(trunk)s/proj/b.txt', 'A'),
-    ('/%(trunk)s/proj/c.txt', 'A'),
-    ('/%(trunk)s/proj/d.txt', 'A'),
-    ('/%(trunk)s/proj/deleted-on-vendor-branch.txt', 'A'),
-    ('/%(trunk)s/proj/e.txt', 'A'),
-    ))
+  check_rev(logs, 2, "Initial revision", {
+    '/trunk/proj' : 'A',
+    '/trunk/proj/a.txt' : 'A',
+    '/trunk/proj/b.txt' : 'A',
+    '/trunk/proj/c.txt' : 'A',
+    '/trunk/proj/d.txt' : 'A',
+    '/trunk/proj/deleted-on-vendor-branch.txt' : 'A',
+    '/trunk/proj/e.txt' : 'A',
+    })
 
 
 def compose_tag_three_sources():
   "compose a tag from three sources"
-  conv = ensure_conversion('compose-tag-three-sources')
+  repos, wc, logs = ensure_conversion('compose-tag-three-sources')
 
-  conv.logs[2].check("Add on trunk", (
-    ('/%(trunk)s/tagged-on-trunk-1.2-a', 'A'),
-    ('/%(trunk)s/tagged-on-trunk-1.2-b', 'A'),
-    ('/%(trunk)s/tagged-on-trunk-1.1', 'A'),
-    ('/%(trunk)s/tagged-on-b1', 'A'),
-    ('/%(trunk)s/tagged-on-b2', 'A'),
-    ))
+  check_rev(logs, 2, "Add on trunk", {
+    '/trunk/tagged-on-trunk-1.2-a': 'A',
+    '/trunk/tagged-on-trunk-1.2-b': 'A',
+    '/trunk/tagged-on-trunk-1.1': 'A',
+    '/trunk/tagged-on-b1': 'A',
+    '/trunk/tagged-on-b2': 'A',
+    })
 
-  conv.logs[3].check(sym_log_msg('b1'), (
-    ('/%(branches)s/b1 (from /%(trunk)s:2)', 'A'),
-    ))
+  check_rev(logs, 3, sym_log_msg('b1'), {
+    '/branches/b1 (from /trunk:2)': 'A',
+    })
 
-  conv.logs[4].check(sym_log_msg('b2'), (
-    ('/%(branches)s/b2 (from /%(trunk)s:2)', 'A'),
-    ))
+  check_rev(logs, 4, sym_log_msg('b2'), {
+    '/branches/b2 (from /trunk:2)': 'A',
+    })
 
-  conv.logs[5].check("Commit on branch b1", (
-    ('/%(branches)s/b1/tagged-on-trunk-1.2-a', 'M'),
-    ('/%(branches)s/b1/tagged-on-trunk-1.2-b', 'M'),
-    ('/%(branches)s/b1/tagged-on-trunk-1.1', 'M'),
-    ('/%(branches)s/b1/tagged-on-b1', 'M'),
-    ('/%(branches)s/b1/tagged-on-b2', 'M'),
-    ))
+  check_rev(logs, 5, "Commit on branch b1", {
+    '/branches/b1/tagged-on-trunk-1.2-a': 'M',
+    '/branches/b1/tagged-on-trunk-1.2-b': 'M',
+    '/branches/b1/tagged-on-trunk-1.1': 'M',
+    '/branches/b1/tagged-on-b1': 'M',
+    '/branches/b1/tagged-on-b2': 'M',
+    })
 
-  conv.logs[6].check("Commit on branch b2", (
-    ('/%(branches)s/b2/tagged-on-trunk-1.2-a', 'M'),
-    ('/%(branches)s/b2/tagged-on-trunk-1.2-b', 'M'),
-    ('/%(branches)s/b2/tagged-on-trunk-1.1', 'M'),
-    ('/%(branches)s/b2/tagged-on-b1', 'M'),
-    ('/%(branches)s/b2/tagged-on-b2', 'M'),
-    ))
+  check_rev(logs, 6, "Commit on branch b2", {
+    '/branches/b2/tagged-on-trunk-1.2-a': 'M',
+    '/branches/b2/tagged-on-trunk-1.2-b': 'M',
+    '/branches/b2/tagged-on-trunk-1.1': 'M',
+    '/branches/b2/tagged-on-b1': 'M',
+    '/branches/b2/tagged-on-b2': 'M',
+    })
 
-  conv.logs[7].check("Commit again on trunk", (
-    ('/%(trunk)s/tagged-on-trunk-1.2-a', 'M'),
-    ('/%(trunk)s/tagged-on-trunk-1.2-b', 'M'),
-    ('/%(trunk)s/tagged-on-trunk-1.1', 'M'),
-    ('/%(trunk)s/tagged-on-b1', 'M'),
-    ('/%(trunk)s/tagged-on-b2', 'M'),
-    ))
+  check_rev(logs, 7, "Commit again on trunk", {
+    '/trunk/tagged-on-trunk-1.2-a': 'M',
+    '/trunk/tagged-on-trunk-1.2-b': 'M',
+    '/trunk/tagged-on-trunk-1.1': 'M',
+    '/trunk/tagged-on-b1': 'M',
+    '/trunk/tagged-on-b2': 'M',
+    })
 
-  conv.logs[8].check(sym_log_msg('T',1), (
-    ('/%(tags)s/T (from /%(trunk)s:7)', 'A'),
-    ('/%(tags)s/T/tagged-on-b2 (from /%(branches)s/b2/tagged-on-b2:7)', 'R'),
-    ('/%(tags)s/T/tagged-on-trunk-1.1 '
-     '(from /%(trunk)s/tagged-on-trunk-1.1:2)', 'R'),
-    ('/%(tags)s/T/tagged-on-b1 (from /%(branches)s/b1/tagged-on-b1:7)', 'R'),
-    ))
+  check_rev(logs, 8, sym_log_msg('T',1), {
+    '/tags/T (from /trunk:7)': 'A',
+    '/tags/T/tagged-on-b2 (from /branches/b2/tagged-on-b2:7)': 'R',
+    '/tags/T/tagged-on-trunk-1.1 (from /trunk/tagged-on-trunk-1.1:2)': 'R',
+    '/tags/T/tagged-on-b1 (from /branches/b1/tagged-on-b1:7)': 'R',
+    })
 
 
 def pass5_when_to_fill():
   "reserve a svn revnum for a fill only when required"
   # The conversion will fail if the bug is present, and
   # ensure_conversion would raise svntest.Failure.
-  conv = ensure_conversion('pass5-when-to-fill')
+  repos, wc, logs = ensure_conversion('pass5-when-to-fill')
 
 
-def empty_trunk(**kw):
+def empty_trunk():
   "don't break when the trunk is empty"
   # The conversion will fail if the bug is present, and
   # ensure_conversion would raise svntest.Failure.
-  conv = ensure_conversion('empty-trunk', **kw)
-
-
-def empty_trunk_variants():
-  "empty trunk, with alternate repo layout"
-  empty_trunk(trunk='a', branches='b', tags='c')
-  empty_trunk(trunk='a/1', branches='a/2', tags='a/3')
-
+  repos, wc, logs = ensure_conversion('empty-trunk')
 
 def no_spurious_svn_commits():
   "ensure that we don't create any spurious commits"
-  conv = ensure_conversion('phoenix')
+  repos, wc, logs = ensure_conversion('phoenix')
 
   # Check spurious commit that could be created in CVSCommit._pre_commit
   #   (When you add a file on a branch, CVS creates a trunk revision
@@ -1572,67 +1359,61 @@ def no_spurious_svn_commits():
   #   in state 'dead'.  If the log message of that commit is equal to
   #   the one that CVS generates, we do not create a primary SVNCommit
   #   for it.)
-  conv.logs[18].check('File added on branch xiphophorus', (
-    ('/%(branches)s/xiphophorus/added-on-branch.txt', 'A'),
-    ))
+  check_rev(logs, 18, 'File added on branch xiphophorus', {
+    '/branches/xiphophorus/added-on-branch.txt' : 'A',
+    })
 
   # Check to make sure that a commit *is* generated:
   #   (When you add a file on a branch, CVS creates a trunk revision
   #   in state 'dead'.  If the log message of that commit is NOT equal
   #   to the one that CVS generates, we create a primary SVNCommit to
   #   serve as a home for the log message in question.
-  conv.logs[19].check('file added-on-branch2.txt was initially added on '
-            + 'branch xiphophorus,\nand this log message was tweaked', ())
+  check_rev(logs, 19, 'file added-on-branch2.txt was initially added on '
+            + 'branch xiphophorus,\nand this log message was tweaked', {})
 
   # Check spurious commit that could be created in
   # CVSRevisionAggregator.attempt_to_commit_symbols
   #   (We shouldn't consider a CVSRevision whose op is OP_DEAD as a
   #   candidate for the LastSymbolicNameDatabase.
-  conv.logs[20].check('This file was also added on branch xiphophorus,', (
-    ('/%(branches)s/xiphophorus/added-on-branch2.txt', 'A'),
-    ))
+  check_rev(logs, 20, 'This file was also added on branch xiphophorus,', {
+    '/branches/xiphophorus/added-on-branch2.txt' : 'A',
+    })
 
 
-def peer_path_pruning(**kw):
+def peer_path_pruning():
   "make sure that filling prunes paths correctly"
-  conv = ensure_conversion('peer-path-pruning', **kw)
-  conv.logs[8].check(sym_log_msg('BRANCH'), (
-    ('/%(branches)s/BRANCH (from /%(trunk)s:6)', 'A'),
-    ('/%(branches)s/BRANCH/bar', 'D'),
-    ('/%(branches)s/BRANCH/foo (from /%(trunk)s/foo:7)', 'R'),
-    ))
-
-
-def peer_path_pruning_variants():
-  "filling prune paths, with alternate repo layout"
-  peer_path_pruning(trunk='a/1', branches='a/2', tags='a/3')
-
+  repos, wc, logs = ensure_conversion('peer-path-pruning')
+  check_rev(logs, 8, sym_log_msg('BRANCH'), {
+    '/branches/BRANCH (from /trunk:6)'         : 'A',
+    '/branches/BRANCH/bar'                     : 'D',
+    '/branches/BRANCH/foo (from /trunk/foo:7)' : 'R',
+    })
 
 def invalid_closings_on_trunk():
   "verify correct revs are copied to default branches"
   # The conversion will fail if the bug is present, and
   # ensure_conversion would raise svntest.Failure.
-  conv = ensure_conversion('invalid-closings-on-trunk')
+  repos, wc, logs = ensure_conversion('invalid-closings-on-trunk')
 
 
 def individual_passes():
   "run each pass individually"
-  conv = ensure_conversion('main')
-  conv2 = ensure_conversion('main', passbypass=1)
+  repos, wc, logs = ensure_conversion('main')
+  repos2, wc2, logs2 = ensure_conversion('main', passbypass=1)
 
-  if conv.logs != conv2.logs:
+  if logs != logs2:
     raise svntest.Failure
 
 
 def resync_bug():
   "reveal a big bug in our resync algorithm"
   # This will fail if the bug is present
-  conv = ensure_conversion('resync-bug')
+  repos, wc, logs = ensure_conversion('resync-bug')
 
 
 def branch_from_default_branch():
   "reveal a bug in our default branch detection code"
-  conv = ensure_conversion('branch-from-default-branch')
+  repos, wc, logs = ensure_conversion('branch-from-default-branch')
 
   # This revision will be a default branch synchronization only
   # if cvs2svn is correctly determining default branch revisions.
@@ -1642,10 +1423,9 @@ def branch_from_default_branch():
   # incorrectly regarding the branch off of the default branch as a
   # non-trunk default branch.  Crystal clear?  I thought so.  See
   # issue #42 for more incoherent blathering.
-  conv.logs[6].check("This commit was generated by cvs2svn", (
-    ('/%(trunk)s/proj/file.txt '
-     '(from /%(branches)s/upstream/proj/file.txt:5)', 'R'),
-    ))
+  check_rev(logs, 6, "This commit was generated by cvs2svn", {
+    '/trunk/proj/file.txt (from /branches/upstream/proj/file.txt:5)': 'R',
+    })
 
 def file_in_attic_too():
   "die if a file exists in and out of the attic"
@@ -1658,7 +1438,7 @@ def file_in_attic_too():
 def symbolic_name_filling_guide():
   "reveal a big bug in our SymbolicNameFillingGuide"
   # This will fail if the bug is present
-  conv = ensure_conversion('symbolic-name-overfill')
+  repos, wc, logs = ensure_conversion('symbolic-name-overfill')
 
 
 # Helpers for tests involving file contents and properties.
@@ -1682,7 +1462,6 @@ def props_for_path(node, path):
   "In the tree rooted under SVNTree NODE, return the prop dict for PATH."
   return node_for_path(node, path).props
 
-
 def eol_mime():
   "test eol settings and mime types together"
   ###TODO: It's a bit klugey to construct this path here.  But so far
@@ -1691,8 +1470,31 @@ def eol_mime():
   ### near ensure_conversion().  Note that it is a convention of this
   ### test suite for a mime.types file to be located in the top level
   ### of the CVS repository to which it applies.
-  mime_path = os.path.join('..', test_data_dir, 'eol-mime-cvsrepos',
-      'mime.types')
+  mime_path = os.path.abspath(os.path.join(test_data_dir,
+                                           'eol-mime-cvsrepos',
+                                           'mime.types'))
+
+  def the_usual_suspects(wc_root):
+    """Return a dictionary mapping files onto their prop dicts.
+    The files are the six files of interest under WC_ROOT, but with
+    the 'trunk/' prefix removed.  Thus the returned dictionary looks
+    like this:
+
+       'foo.txt'  ==>  { property dictionary for '/trunk/foo.txt' }
+       'foo.xml'  ==>  { property dictionary for '/trunk/foo.xml' }
+       'foo.zip'  ==>  { property dictionary for '/trunk/foo.zip' }
+       'foo.bin'  ==>  { property dictionary for '/trunk/foo.bin' }
+       'foo.csv'  ==>  { property dictionary for '/trunk/foo.csv' }
+       'foo.dbf'  ==>  { property dictionary for '/trunk/foo.dbf' }
+    """
+    return {
+      'foo.txt' : props_for_path(wc_root, 'trunk/foo.txt'),
+      'foo.xml' : props_for_path(wc_root, 'trunk/foo.xml'),
+      'foo.zip' : props_for_path(wc_root, 'trunk/foo.zip'),
+      'foo.bin' : props_for_path(wc_root, 'trunk/foo.bin'),
+      'foo.csv' : props_for_path(wc_root, 'trunk/foo.csv'),
+      'foo.dbf' : props_for_path(wc_root, 'trunk/foo.dbf'),
+      }
 
   # We do four conversions.  Each time, we pass --mime-types=FILE with
   # the same FILE, but vary --no-default-eol and --eol-from-mime-type.
@@ -1701,100 +1503,248 @@ def eol_mime():
   #
   # In two of the four conversions, we pass --cvs-revnums to make
   # certain that there are no bad interactions.
-  #
-  # The files are as follows:
-  #
-  #     trunk/foo.txt: no -kb, mime file says nothing.
-  #     trunk/foo.xml: no -kb, mime file says text.
-  #     trunk/foo.zip: no -kb, mime file says non-text.
-  #     trunk/foo.bin: has -kb, mime file says nothing.
-  #     trunk/foo.csv: has -kb, mime file says text.
-  #     trunk/foo.dbf: has -kb, mime file says non-text.
 
   ## Neither --no-default-eol nor --eol-from-mime-type. ##
-  conv = ensure_conversion(
-      'eol-mime', args=['--mime-types=%s' % mime_path, '--cvs-revnums'])
-  conv.check_props(
-      ['svn:eol-style', 'svn:mime-type', 'cvs2svn:cvs-rev'],
-      [
-          ('trunk/foo.txt', ['native', None, '1.2']),
-          ('trunk/foo.xml', ['native', 'text/xml', '1.2']),
-          ('trunk/foo.zip', ['native', 'application/zip', '1.2']),
-          ('trunk/foo.bin', [None, 'application/octet-stream', '1.2']),
-          ('trunk/foo.csv', [None, 'text/csv', '1.2']),
-          ('trunk/foo.dbf', [None, 'application/what-is-dbf', '1.2']),
-          ]
-      )
+  repos, wc, logs = ensure_conversion('eol-mime', None, None,
+                                      '--mime-types=%s' % mime_path,
+                                      '--cvs-revnums')
+  wc_tree = svntest.tree.build_tree_from_wc(wc, 1)
+  allprops = the_usual_suspects(wc_tree)
+
+  # foo.txt (no -kb, mime file says nothing)
+  if allprops['foo.txt'].get('svn:eol-style') != 'native':
+    raise svntest.Failure
+  if allprops['foo.txt'].get('svn:mime-type') is not None:
+    raise svntest.Failure
+  if not allprops['foo.txt'].get('cvs2svn:cvs-rev') == '1.2':
+    raise svntest.Failure
+
+  # foo.xml (no -kb, mime file says text)
+  if allprops['foo.xml'].get('svn:eol-style') != 'native':
+    raise svntest.Failure
+  if allprops['foo.xml'].get('svn:mime-type') != 'text/xml':
+    raise svntest.Failure
+  if not allprops['foo.xml'].get('cvs2svn:cvs-rev') == '1.2':
+    raise svntest.Failure
+
+  # foo.zip (no -kb, mime file says non-text)
+  if allprops['foo.zip'].get('svn:eol-style') != 'native':
+    raise svntest.Failure
+  if allprops['foo.zip'].get('svn:mime-type') != 'application/zip':
+    raise svntest.Failure
+  if not allprops['foo.zip'].get('cvs2svn:cvs-rev') == '1.2':
+    raise svntest.Failure
+
+  # foo.bin (has -kb, mime file says nothing)
+  if allprops['foo.bin'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.bin'].get('svn:mime-type') != 'application/octet-stream':
+    raise svntest.Failure
+  if not allprops['foo.bin'].get('cvs2svn:cvs-rev') == '1.2':
+    raise svntest.Failure
+
+  # foo.csv (has -kb, mime file says text)
+  if allprops['foo.csv'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.csv'].get('svn:mime-type') != 'text/csv':
+    raise svntest.Failure
+  if not allprops['foo.csv'].get('cvs2svn:cvs-rev') == '1.2':
+    raise svntest.Failure
+
+  # foo.dbf (has -kb, mime file says non-text)
+  if allprops['foo.dbf'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.dbf'].get('svn:mime-type') != 'application/what-is-dbf':
+    raise svntest.Failure
+  if not allprops['foo.dbf'].get('cvs2svn:cvs-rev') == '1.2':
+    raise svntest.Failure
 
   ## Just --no-default-eol, not --eol-from-mime-type. ##
-  conv = ensure_conversion(
-      'eol-mime', args=['--mime-types=%s' % mime_path, '--no-default-eol'])
-  conv.check_props(
-      ['svn:eol-style', 'svn:mime-type', 'cvs2svn:cvs-rev'],
-      [
-          ('trunk/foo.txt', [None, None, None]),
-          ('trunk/foo.xml', [None, 'text/xml', None]),
-          ('trunk/foo.zip', [None, 'application/zip', None]),
-          ('trunk/foo.bin', [None, 'application/octet-stream', None]),
-          ('trunk/foo.csv', [None, 'text/csv', None]),
-          ('trunk/foo.dbf', [None, 'application/what-is-dbf', None]),
-          ]
-      )
+  repos, wc, logs = ensure_conversion('eol-mime', None, None,
+                                      '--mime-types=%s' % mime_path,
+                                      '--no-default-eol')
+  wc_tree = svntest.tree.build_tree_from_wc(wc, 1)
+  allprops = the_usual_suspects(wc_tree)
+
+  # foo.txt (no -kb, mime file says nothing)
+  if allprops['foo.txt'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.txt'].get('svn:mime-type') is not None:
+    raise svntest.Failure
+
+  # foo.xml (no -kb, mime file says text)
+  if allprops['foo.xml'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.xml'].get('svn:mime-type') != 'text/xml':
+    raise svntest.Failure
+
+  # foo.zip (no -kb, mime file says non-text)
+  if allprops['foo.zip'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.zip'].get('svn:mime-type') != 'application/zip':
+    raise svntest.Failure
+
+  # foo.bin (has -kb, mime file says nothing)
+  if allprops['foo.bin'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.bin'].get('svn:mime-type') != 'application/octet-stream':
+    raise svntest.Failure
+
+  # foo.csv (has -kb, mime file says text)
+  if allprops['foo.csv'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.csv'].get('svn:mime-type') != 'text/csv':
+    raise svntest.Failure
+
+  # foo.dbf (has -kb, mime file says non-text)
+  if allprops['foo.dbf'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.dbf'].get('svn:mime-type') != 'application/what-is-dbf':
+    raise svntest.Failure
 
   ## Just --eol-from-mime-type, not --no-default-eol. ##
-  conv = ensure_conversion('eol-mime', args=[
-      '--mime-types=%s' % mime_path, '--eol-from-mime-type', '--cvs-revnums'
-      ])
-  conv.check_props(
-      ['svn:eol-style', 'svn:mime-type', 'cvs2svn:cvs-rev'],
-      [
-          ('trunk/foo.txt', ['native', None, '1.2']),
-          ('trunk/foo.xml', ['native', 'text/xml', '1.2']),
-          ('trunk/foo.zip', [None, 'application/zip', '1.2']),
-          ('trunk/foo.bin', [None, 'application/octet-stream', '1.2']),
-          ('trunk/foo.csv', [None, 'text/csv', '1.2']),
-          ('trunk/foo.dbf', [None, 'application/what-is-dbf', '1.2']),
-          ]
-      )
+  repos, wc, logs = ensure_conversion('eol-mime', None, None,
+                                      '--mime-types=%s' % mime_path,
+                                      '--eol-from-mime-type',
+                                      '--cvs-revnums')
+  wc_tree = svntest.tree.build_tree_from_wc(wc, 1)
+  allprops = the_usual_suspects(wc_tree)
+
+  # foo.txt (no -kb, mime file says nothing)
+  if allprops['foo.txt'].get('svn:eol-style') != 'native':
+    raise svntest.Failure
+  if allprops['foo.txt'].get('svn:mime-type') is not None:
+    raise svntest.Failure
+  if not allprops['foo.txt'].get('cvs2svn:cvs-rev') == '1.2':
+    raise svntest.Failure
+
+  # foo.xml (no -kb, mime file says text)
+  if allprops['foo.xml'].get('svn:eol-style') != 'native':
+    raise svntest.Failure
+  if allprops['foo.xml'].get('svn:mime-type') != 'text/xml':
+    raise svntest.Failure
+  if not allprops['foo.xml'].get('cvs2svn:cvs-rev') == '1.2':
+    raise svntest.Failure
+
+  # foo.zip (no -kb, mime file says non-text)
+  if allprops['foo.zip'].get('svn:eol-style') != 'native':
+    raise svntest.Failure
+  if allprops['foo.zip'].get('svn:mime-type') != 'application/zip':
+    raise svntest.Failure
+  if not allprops['foo.zip'].get('cvs2svn:cvs-rev') == '1.2':
+    raise svntest.Failure
+
+  # foo.bin (has -kb, mime file says nothing)
+  if allprops['foo.bin'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.bin'].get('svn:mime-type') != 'application/octet-stream':
+    raise svntest.Failure
+  if not allprops['foo.bin'].get('cvs2svn:cvs-rev') == '1.2':
+    raise svntest.Failure
+
+  # foo.csv (has -kb, mime file says text)
+  if allprops['foo.csv'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.csv'].get('svn:mime-type') != 'text/csv':
+    raise svntest.Failure
+  if not allprops['foo.csv'].get('cvs2svn:cvs-rev') == '1.2':
+    raise svntest.Failure
+
+  # foo.dbf (has -kb, mime file says non-text)
+  if allprops['foo.dbf'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.dbf'].get('svn:mime-type') != 'application/what-is-dbf':
+    raise svntest.Failure
+  if not allprops['foo.dbf'].get('cvs2svn:cvs-rev') == '1.2':
+    raise svntest.Failure
 
   ## Both --no-default-eol and --eol-from-mime-type. ##
-  conv = ensure_conversion('eol-mime', args=[
-      '--mime-types=%s' % mime_path, '--eol-from-mime-type',
-      '--no-default-eol'])
-  conv.check_props(
-      ['svn:eol-style', 'svn:mime-type', 'cvs2svn:cvs-rev'],
-      [
-          ('trunk/foo.txt', [None, None, None]),
-          ('trunk/foo.xml', ['native', 'text/xml', None]),
-          ('trunk/foo.zip', [None, 'application/zip', None]),
-          ('trunk/foo.bin', [None, 'application/octet-stream', None]),
-          ('trunk/foo.csv', [None, 'text/csv', None]),
-          ('trunk/foo.dbf', [None, 'application/what-is-dbf', None]),
-          ]
-      )
+  repos, wc, logs = ensure_conversion('eol-mime', None, None,
+                                      '--mime-types=%s' % mime_path,
+                                      '--eol-from-mime-type',
+                                      '--no-default-eol')
+  wc_tree = svntest.tree.build_tree_from_wc(wc, 1)
+  allprops = the_usual_suspects(wc_tree)
 
+  # foo.txt (no -kb, mime file says nothing)
+  if allprops['foo.txt'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.txt'].get('svn:mime-type') is not None:
+    raise svntest.Failure
+
+  # foo.xml (no -kb, mime file says text)
+  if allprops['foo.xml'].get('svn:eol-style') != 'native':
+    raise svntest.Failure
+  if allprops['foo.xml'].get('svn:mime-type') != 'text/xml':
+    raise svntest.Failure
+
+  # foo.zip (no -kb, mime file says non-text)
+  if allprops['foo.zip'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.zip'].get('svn:mime-type') != 'application/zip':
+    raise svntest.Failure
+
+  # foo.bin (has -kb, mime file says nothing)
+  if allprops['foo.bin'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.bin'].get('svn:mime-type') != 'application/octet-stream':
+    raise svntest.Failure
+
+  # foo.csv (has -kb, mime file says text)
+  if allprops['foo.csv'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.csv'].get('svn:mime-type') != 'text/csv':
+    raise svntest.Failure
+
+  # foo.dbf (has -kb, mime file says non-text)
+  if allprops['foo.dbf'].get('svn:eol-style') is not None:
+    raise svntest.Failure
+  if allprops['foo.dbf'].get('svn:mime-type') != 'application/what-is-dbf':
+    raise svntest.Failure
+
+
+def check_props(allprops, fname, keywords, eol_style, mime_type):
+  "helper function for keywords test"
+  props = allprops[fname]
+  if (keywords == props.get('svn:keywords') and
+      eol_style == props.get('svn:eol-style') and
+      mime_type == props.get('svn:mime-type') ):
+    pass
+  else:
+    print "Unexpected properties for '%s'" % fname
+    print "keywords:\t%s\t%s" % (keywords, props.get('svn:keywords'))
+    print "eol-style:\t%s\t%s" % (eol_style, props.get('svn:eol-style'))
+    print "mime-type:\t%s\t%s" % (mime_type, props.get('svn:mime-type'))
+    raise svntest.Failure
 
 def keywords():
   "test setting of svn:keywords property among others"
-  conv = ensure_conversion('keywords')
-  conv.check_props(
-      ['svn:keywords', 'svn:eol-style', 'svn:mime-type'],
-      [
-          ('trunk/foo.default', ['Author Date Id Revision', 'native', None]),
-          ('trunk/foo.kkvl', ['Author Date Id Revision', 'native', None]),
-          ('trunk/foo.kkv', ['Author Date Id Revision', 'native', None]),
-          ('trunk/foo.kb', [None, None, 'application/octet-stream']),
-          ('trunk/foo.kk', [None, 'native', None]),
-          ('trunk/foo.ko', [None, 'native', None]),
-          ('trunk/foo.kv', [None, 'native', None]),
-          ]
-      )
+  repos, wc, logs = ensure_conversion('keywords')
+  wc_tree = svntest.tree.build_tree_from_wc(wc, 1)
+  allprops = {
+    'foo.default' : props_for_path(wc_tree, '/trunk/foo.default'),
+    'foo.kkvl'    : props_for_path(wc_tree, '/trunk/foo.kkvl'),
+    'foo.kkv'     : props_for_path(wc_tree, '/trunk/foo.kkv'),
+    'foo.kb'      : props_for_path(wc_tree, '/trunk/foo.kb'),
+    'foo.kk'      : props_for_path(wc_tree, '/trunk/foo.kk'),
+    'foo.ko'      : props_for_path(wc_tree, '/trunk/foo.ko'),
+    'foo.kv'      : props_for_path(wc_tree, '/trunk/foo.kv'),
+    }
+
+  check_props(allprops, 'foo.default', 'Author Date Id Revision', 'native',
+      None)
+  check_props(allprops, 'foo.kkvl', 'Author Date Id Revision', 'native', None)
+  check_props(allprops, 'foo.kkv', 'Author Date Id Revision', 'native', None)
+  check_props(allprops, 'foo.kb', None, None, 'application/octet-stream')
+  check_props(allprops, 'foo.kk', None, 'native', None)
+  check_props(allprops, 'foo.ko', None, 'native', None)
+  check_props(allprops, 'foo.kv', None, 'native', None)
 
 
 def ignore():
   "test setting of svn:ignore property"
-  conv = ensure_conversion('cvsignore')
-  wc_tree = conv.get_wc_tree()
+  repos, wc, logs = ensure_conversion('cvsignore')
+  wc_tree = svntest.tree.build_tree_from_wc(wc, 1)
   topdir_props = props_for_path(wc_tree, 'trunk/proj')
   subdir_props = props_for_path(wc_tree, '/trunk/proj/subdir')
 
@@ -1810,76 +1760,61 @@ def ignore():
 def requires_cvs():
   "test that CVS can still do what RCS can't"
   # See issues 4, 11, 29 for the bugs whose regression we're testing for.
-  conv = ensure_conversion('requires-cvs', args=["--use-cvs"])
+  repos, wc, logs = ensure_conversion('requires-cvs', None, None, "--use-cvs")
 
-  atsign_contents = file(
-      os.path.join(conv.get_wc(), "trunk", "atsign-add")).read()
-  cl_contents = file(
-      os.path.join(conv.get_wc(), "trunk", "client_lock.idl")).read()
+  atsign_contents = file(os.path.join(wc, "trunk", "atsign-add")).read()
+  cl_contents     = file(os.path.join(wc, "trunk", "client_lock.idl")).read()
 
   if atsign_contents[-1:] == "@":
     raise svntest.Failure
   if cl_contents.find("gregh\n//\n//Integration for locks") < 0:
     raise svntest.Failure
 
-  if not (conv.logs[21].author == "William Lyon Phelps III" and
-          conv.logs[20].author == "j random"):
+  if not (logs[21].author == "William Lyon Phelps III" and
+          logs[20].author == "j random"):
     raise svntest.Failure
 
 
-def questionable_branch_names():
-  "test that we can handle weird branch names"
-  conv = ensure_conversion('questionable-symbols')
+def questionable_symbols():
+  "test that we can handle weird symbolic names"
+  repos, wc, logs = ensure_conversion('questionable-symbols')
   # If the conversion succeeds, then we're okay.  We could check the
   # actual branch paths, too, but the main thing is to know that the
   # conversion doesn't fail.
 
-
-def questionable_tag_names():
-  "test that we can handle weird tag names"
-  conv = ensure_conversion('questionable-symbols')
-  for tag_name in ['Tag_A', 'TagWith--Backslash_E', 'TagWith++Slash_Z']:
-    conv.find_tag_log(tag_name).check(sym_log_msg(tag_name,1), (
-      ('/%(tags)s/' + tag_name + ' (from /trunk:8)', 'A'),
-      ))
-
-
 def revision_reorder_bug():
   "reveal a bug that reorders file revisions"
-  conv = ensure_conversion('revision-reorder-bug')
+  repos, wc, logs = ensure_conversion('revision-reorder-bug')
   # If the conversion succeeds, then we're okay.  We could check the
   # actual revisions, too, but the main thing is to know that the
   # conversion doesn't fail.
 
-
 def exclude():
   "test that exclude really excludes everything"
-  conv = ensure_conversion('main', args=['--exclude=.*'])
-  for log in conv.logs.values():
+  repos, wc, logs = ensure_conversion('main', None, None,
+                                      '--exclude=.*')
+  for log in logs.values():
     for item in log.changed_paths.keys():
-      if item.startswith('/branches/') or item.startswith('/tags/'):
+      if item[:10] == '/branches/' or item[:6] == '/tags/':
         raise svntest.Failure
 
 
 def vendor_branch_delete_add():
   "add trunk file that was deleted on vendor branch"
   # This will error if the bug is present
-  conv = ensure_conversion('vendor-branch-delete-add')
-
+  repos, wc, logs = ensure_conversion('vendor-branch-delete-add')
 
 def resync_pass2_pull_forward():
   "ensure pass2 doesn't pull rev too far forward"
-  conv = ensure_conversion('resync-pass2-pull-forward')
+  repos, wc, logs = ensure_conversion('resync-pass2-pull-forward')
   # If the conversion succeeds, then we're okay.  We could check the
   # actual revisions, too, but the main thing is to know that the
   # conversion doesn't fail.
 
-
 def native_eol():
   "only LFs for svn:eol-style=native files"
-  conv = ensure_conversion('native-eol')
-  lines = run_program(svntest.main.svnadmin_binary, None, 'dump', '-q',
-                      conv.repos)
+  repos, wc, logs = ensure_conversion('native-eol', None, None)
+  lines = run_program(svntest.main.svnadmin_binary, None, 'dump', '-q', repos)
   # Verify that all files in the dump have LF EOLs.  We're actually
   # testing the whole dump file, but the dump file itself only uses
   # LF EOLs, so we're safe.
@@ -1887,186 +1822,33 @@ def native_eol():
     if line[-1] != '\n' or line[:-1].find('\r') != -1:
       raise svntest.Failure
 
-
 def double_fill():
   "reveal a bug that created a branch twice"
-  conv = ensure_conversion('double-fill')
+  repos, wc, logs = ensure_conversion('double-fill')
   # If the conversion succeeds, then we're okay.  We could check the
   # actual revisions, too, but the main thing is to know that the
   # conversion doesn't fail.
-
 
 def resync_pass2_push_backward():
   "ensure pass2 doesn't push rev too far backward"
-  conv = ensure_conversion('resync-pass2-push-backward')
+  repos, wc, logs = ensure_conversion('resync-pass2-push-backward')
   # If the conversion succeeds, then we're okay.  We could check the
   # actual revisions, too, but the main thing is to know that the
   # conversion doesn't fail.
-
 
 def double_add():
   "reveal a bug that added a branch file twice"
-  conv = ensure_conversion('double-add')
+  repos, wc, logs = ensure_conversion('double-add')
   # If the conversion succeeds, then we're okay.  We could check the
   # actual revisions, too, but the main thing is to know that the
   # conversion doesn't fail.
-
 
 def bogus_branch_copy():
   "reveal a bug that copies a branch file wrongly"
-  conv = ensure_conversion('bogus-branch-copy')
+  repos, wc, logs = ensure_conversion('bogus-branch-copy')
   # If the conversion succeeds, then we're okay.  We could check the
   # actual revisions, too, but the main thing is to know that the
   # conversion doesn't fail.
-
-
-def nested_ttb_directories():
-  "require error if ttb directories are not disjoint"
-  opts_list = [
-    {'trunk' : 'a', 'branches' : 'a',},
-    {'trunk' : 'a', 'tags' : 'a',},
-    {'branches' : 'a', 'tags' : 'a',},
-    # This option conflicts with the default trunk path:
-    {'branches' : 'trunk',},
-    # Try some nested directories:
-    {'trunk' : 'a', 'branches' : 'a/b',},
-    {'trunk' : 'a/b', 'tags' : 'a/b/c/d',},
-    {'branches' : 'a', 'tags' : 'a/b',},
-    ]
-
-  for opts in opts_list:
-    try:
-      ensure_conversion(
-          'main', error_re=r'.*paths .* and .* are not disjoint\.', **opts
-          )
-      raise MissingErrorException
-    except svntest.Failure:
-      pass
-
-
-def auto_props_ignore_case():
-  "test auto-props (case-insensitive)"
-  ### TODO: It's a bit klugey to construct this path here.  See also
-  ### the comment in eol_mime().
-  auto_props_path = os.path.join('..', test_data_dir, 'eol-mime-cvsrepos',
-      'auto-props')
-
-  # The files are as follows:
-  #
-  #     trunk/foo.txt: no -kb, mime auto-prop says nothing.
-  #     trunk/foo.xml: no -kb, mime auto-prop says text and eol-style=CRLF.
-  #     trunk/foo.zip: no -kb, mime auto-prop says non-text.
-  #     trunk/foo.bin: has -kb, mime auto-prop says nothing.
-  #     trunk/foo.csv: has -kb, mime auto-prop says text.
-  #     trunk/foo.dbf: has -kb, mime auto-prop says non-text.
-  #     trunk/foo.UPCASE1: no -kb, no mime type.
-  #     trunk/foo.UPCASE2: no -kb, no mime type.
-
-  conv = ensure_conversion(
-      'eol-mime',
-      args=['--auto-props=%s' % auto_props_path, '--auto-props-ignore-case'])
-  conv.check_props(
-      ['myprop', 'svn:eol-style', 'svn:mime-type'],
-      [
-          ('trunk/foo.txt', ['txt', 'native', None]),
-          ('trunk/foo.xml', ['xml', 'CRLF', 'text/xml']),
-          ('trunk/foo.zip', ['zip', 'native', 'application/zip']),
-          ('trunk/foo.bin', ['bin', None, 'application/octet-stream']),
-          ('trunk/foo.csv', ['csv', None, 'text/csv']),
-          ('trunk/foo.dbf', ['dbf', None, 'application/what-is-dbf']),
-          ('trunk/foo.UPCASE1', ['UPCASE1', 'native', None]),
-          ('trunk/foo.UPCASE2', ['UPCASE2', 'native', None]),
-          ]
-      )
-
-
-def auto_props():
-  "test auto-props (case-sensitive)"
-  # See auto_props for comments.
-  auto_props_path = os.path.join('..', test_data_dir, 'eol-mime-cvsrepos',
-      'auto-props')
-
-  conv = ensure_conversion(
-      'eol-mime', args=['--auto-props=%s' % auto_props_path])
-  conv.check_props(
-      ['myprop', 'svn:eol-style', 'svn:mime-type'],
-      [
-          ('trunk/foo.txt', ['txt', 'native', None]),
-          ('trunk/foo.xml', ['xml', 'CRLF', 'text/xml']),
-          ('trunk/foo.zip', ['zip', 'native', 'application/zip']),
-          ('trunk/foo.bin', ['bin', None, 'application/octet-stream']),
-          ('trunk/foo.csv', ['csv', None, 'text/csv']),
-          ('trunk/foo.dbf', ['dbf', None, 'application/what-is-dbf']),
-          ('trunk/foo.UPCASE1', ['UPCASE1', 'native', None]),
-          ('trunk/foo.UPCASE2', [None, 'native', None]),
-          ]
-      )
-
-
-def ctrl_char_in_filename():
-  "do not allow control characters in filenames"
-
-  try:
-    srcrepos_path = os.path.join(test_data_dir,'main-cvsrepos')
-    dstrepos_path = os.path.join(test_data_dir,'ctrl-char-filename-cvsrepos')
-    if os.path.exists(dstrepos_path):
-      svntest.main.safe_rmtree(dstrepos_path)
-
-    # create repos from existing main repos
-    shutil.copytree(srcrepos_path, dstrepos_path)
-    base_path = os.path.join(dstrepos_path, 'single-files')
-    try:
-      shutil.copyfile(os.path.join(base_path, 'twoquick,v'),
-                      os.path.join(base_path, 'two\rquick,v'))
-    except:
-      # Operating systems that don't allow control characters in
-      # filenames will hopefully have thrown an exception; in that
-      # case, just skip this test.
-      raise svntest.Skip
-
-    try:
-      conv = ensure_conversion(
-          'ctrl-char-filename',
-          error_re=(r'.*Character .* in filename .* '
-                    r'is not supported by subversion\.'),
-          )
-      raise MissingErrorException
-    except svntest.Failure:
-      pass
-  finally:
-    svntest.main.safe_rmtree(dstrepos_path)
-
-
-def commit_dependencies():
-  "interleaved and multi-branch commits to same files"
-  conv = ensure_conversion("commit-dependencies")
-  conv.logs[2].check('adding', (
-    ('/%(trunk)s/interleaved', 'A'),
-    ('/%(trunk)s/interleaved/file1', 'A'),
-    ('/%(trunk)s/interleaved/file2', 'A'),
-    ))
-  conv.logs[3].check('big commit', (
-    ('/%(trunk)s/interleaved/file1', 'M'),
-    ('/%(trunk)s/interleaved/file2', 'M'),
-    ))
-  conv.logs[4].check('dependant small commit', (
-    ('/%(trunk)s/interleaved/file1', 'M'),
-    ))
-  conv.logs[5].check('adding', (
-    ('/%(trunk)s/multi-branch', 'A'),
-    ('/%(trunk)s/multi-branch/file1', 'A'),
-    ('/%(trunk)s/multi-branch/file2', 'A'),
-    ))
-  conv.logs[6].check(sym_log_msg("branch"), (
-    ('/%(branches)s/branch (from /%(trunk)s:5)', 'A'),
-    ('/%(branches)s/branch/interleaved', 'D'),
-    ))
-  conv.logs[7].check('multi-branch-commit', (
-    ('/%(trunk)s/multi-branch/file1', 'M'),
-    ('/%(trunk)s/multi-branch/file2', 'M'),
-    ('/%(branches)s/branch/multi-branch/file1', 'M'),
-    ('/%(branches)s/branch/multi-branch/file2', 'M'),
-    ))
 
 
 #----------------------------------------------------------------------
@@ -2120,33 +1902,17 @@ test_list = [ None,
               keywords,
               ignore,
               requires_cvs,
-              questionable_branch_names,
-              questionable_tag_names,
+              questionable_symbols,
               revision_reorder_bug,
               exclude,
               vendor_branch_delete_add,
-              resync_pass2_pull_forward,            # 50
-              native_eol,
+              resync_pass2_pull_forward,
+              native_eol,                           # 50
               double_fill,
               resync_pass2_push_backward,
               double_add,
               bogus_branch_copy,
-              nested_ttb_directories,
-              prune_with_care_variants,
-              simple_tags_variants,
-              phoenix_branch_variants,
-              no_trunk_prune_variants,              # 60
-              tagged_branch_and_trunk_variants,
-              branch_delete_first_variants,
-              empty_trunk_variants,
-              peer_path_pruning_variants,
-              auto_props_ignore_case,
-              auto_props,
-              ctrl_char_in_filename,
-              commit_dependencies,
-              show_help_passes,
-              multiple_tags,                        # 70
-              ]
+             ]
 
 if __name__ == '__main__':
 

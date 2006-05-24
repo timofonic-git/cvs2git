@@ -1,0 +1,6 @@
+.cvsignore
+.svn
+compat
+compat.py
+update.sh
+README.cvs2svn

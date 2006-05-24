@@ -16,22 +16,16 @@
 
 """
 Report information about CVS revisions, tags, and branches in a CVS
-repository by examining the temporary files output by pass 1 of cvs2svn
-on that repository.  NOTE: You have to run the conversion pass yourself!
+repository by examining the results of running pass 1 of cvs2svn on
+that repository.  NOTE: You have to run the conversion passes
+yourself!
 """
 
-import sys, os, os.path
+import sys, os, os.path, string
+from cvs2svn import CVSRevision
 
-from cvs2svn_lib.database import DB_OPEN_READ
-from cvs2svn_lib.config import CVS_FILES_DB, CVS_REVS_DB, ALL_REVS_DATAFILE
-from cvs2svn_lib.cvs_file_database import CVSFileDatabase
-from cvs2svn_lib.cvs_revision_database import CVSRevisionDatabase
-
-def do_it():
-  cvs_files_db = CVSFileDatabase(CVS_FILES_DB, DB_OPEN_READ)
-  cvs_revs_db = CVSRevisionDatabase(cvs_files_db, CVS_REVS_DB, DB_OPEN_READ)
-  fp = open(ALL_REVS_DATAFILE, 'r')
-
+def do_it(revs_file):
+  fp = open(revs_file, 'r')
   tags = { }
   branches = { }
 
@@ -47,8 +41,8 @@ def do_it():
     if not line:
       break
 
-    c_rev_key = line.strip()
-    c_rev = cvs_revs_db.get_revision(c_rev_key)
+    # Get a CVSRevision to describe this line
+    c_rev = CVSRevision(None, line)
 
     # Handle tags
     num_tags = len(c_rev.tags)
@@ -99,9 +93,8 @@ def do_it():
 if __name__ == "__main__":
   argc = len(sys.argv)
   if argc < 2:
-    print 'Usage: %s /path/to/cvs2svn-temporary-directory' \
+    print 'Usage: %s /path/to/cvs2svn-data.[c-|s-|]revs' \
         % (os.path.basename(sys.argv[0]))
     print __doc__
     sys.exit(0)
-  os.chdir(sys.argv[1])
-  do_it()
+  do_it(sys.argv[1])
