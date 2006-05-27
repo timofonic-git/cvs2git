@@ -1,19 +1,12 @@
+# -*-python-*-
 #
-# Copyright (C) 2000-2002 The ViewCVS Group. All Rights Reserved.
+# Copyright (C) 1999-2006 The ViewCVS Group. All Rights Reserved.
 #
 # By using this file, you agree to the terms and conditions set forth in
-# the LICENSE.html file which can be found at the top level of the ViewCVS
-# distribution or at http://viewcvs.sourceforge.net/license-1.html.
+# the LICENSE.html file which can be found at the top level of the ViewVC
+# distribution or at http://viewvc.org/license-1.html.
 #
-# Contact information:
-#   Greg Stein, PO Box 760, Palo Alto, CA, 94302
-#   gstein@lyra.org, http://viewcvs.sourceforge.net/
-#
-# -----------------------------------------------------------------------
-#
-# This software is being maintained as part of the ViewCVS project.
-# Information is available at:
-#    http://viewcvs.sourceforge.net/
+# For more information, visit http://viewvc.org/
 #
 # -----------------------------------------------------------------------
 
@@ -135,7 +128,9 @@ class _Parser:
           tag = self.ts.get()
           if tag == ';':
             break
-          (locker, rev) = string.split(tag,':')
+          self.ts.match(':')
+          locker = tag
+          rev = self.ts.get()
           self.sink.set_locker(rev, locker)
 
         tag = self.ts.get()
