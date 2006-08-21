@@ -48,6 +48,7 @@ from cvs2svn_lib.cvs_file_database import CVSFileDatabase
 from cvs2svn_lib.cvs_item_database import CVSItemDatabase
 from cvs2svn_lib.symbol_statistics_collector import SymbolStatisticsCollector
 from cvs2svn_lib.metadata_database import MetadataDatabase
+from cvs2svn_lib.pairings_database import PairingsDatabase
 
 import cvs2svn_rcsparse
 
@@ -662,8 +663,10 @@ class _FileDataCollector(cvs2svn_rcsparse.Sink):
     if is_branch_revision(revision):
       branch_data = self.sdc.rev_to_branch_data(revision)
       lod = Branch(branch_data.name)
+      lod_name = branch_data.name
     else:
       lod = Trunk()
+      lod_name = None
 
     branch_names = [
         branch_data.name
@@ -674,6 +677,11 @@ class _FileDataCollector(cvs2svn_rcsparse.Sink):
         tag_data.name
         for tag_data in rev_data.tags_data
         ]
+
+    # Record any symbol pairings for this revision.
+    if not Ctx().trunk_only:
+      self.collect_data.pairings_db.register_branches(
+          lod_name, branch_names, tag_names)
 
     c_rev = CVSRevision(
         self._get_rev_id(revision), self.cvs_file,
@@ -788,6 +796,8 @@ class CollectData:
     self.num_files = 0
     self.symbol_stats = SymbolStatisticsCollector()
     self.stats_keeper = stats_keeper
+    if not Ctx().trunk_only:
+      self.pairings_db = PairingsDatabase(DB_OPEN_NEW)
 
     # Key generator to generate unique keys for each CVSRevision object:
     self.key_generator = KeyGenerator()
@@ -810,5 +820,7 @@ class CollectData:
 
   def write_symbol_stats(self):
     self.symbol_stats.write()
+    if not Ctx().trunk_only:
+      self.pairings_db.write()
 
 

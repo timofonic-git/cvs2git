@@ -87,11 +87,11 @@ class CVSRevisionAggregator:
     # been closed yet.
     self.pending_symbols = {}
 
-    # A list of closed symbols.  That is, we've already encountered
-    # the last CVSRevision that is a source for that symbol, the final
-    # fill for this symbol has been done, and we never need to fill it
-    # again.
-    self.done_symbols = [ ]
+    # A map { symbol : None } of closed symbols.  That is, we've
+    # already encountered the last CVSRevision that is a source for
+    # that symbol, the final fill for this symbol has been done, and
+    # we never need to fill it again.
+    self.done_symbols = { }
 
     # This variable holds the most recently created primary svn_commit
     # object.  CVSRevisionAggregator maintains this variable merely
@@ -99,7 +99,8 @@ class CVSRevisionAggregator:
     # created in self._attempt_to_commit_symbols().
     self.latest_primary_svn_commit = None
 
-    Ctx()._symbolings_logger = SymbolingsLogger()
+    if not Ctx().trunk_only:
+      Ctx()._symbolings_logger = SymbolingsLogger()
     Ctx()._persistence_manager = PersistenceManager(DB_OPEN_NEW)
 
   def _get_deps(self, c_rev, deps):
@@ -247,7 +248,7 @@ class CVSRevisionAggregator:
       svn_commit.set_symbolic_name(sym)
       svn_commit.set_date(self.latest_primary_svn_commit.get_date())
       svn_commit.flush()
-      self.done_symbols.append(sym)
+      self.done_symbols[sym] = None
       del self.pending_symbols[sym]
 
 

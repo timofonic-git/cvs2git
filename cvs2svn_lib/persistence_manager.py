@@ -16,6 +16,7 @@
 
 """This module contains class PersistenceManager."""
 
+import bisect
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib import config
@@ -64,10 +65,29 @@ class PersistenceManager:
     if not Ctx().trunk_only:
       self.symbol_db = SymbolDatabase(DB_OPEN_READ)
 
-    # "branch_name" -> svn_revnum in which branch was last filled.
-    # This is used by CVSCommit._pre_commit, to prevent creating a fill
-    # revision which would have nothing to do.
-    self.last_filled = {}
+    # "branch_name" -> [svn_revnums in which branch was filled].
+    self._fills = {}
+
+  def last_filled(self, name):
+    """Return the last Subversion revision number in which NAME was filled.
+    This is used by CVSCommit._pre_commit, to prevent creating a fill
+    revision which would have nothing to do."""
+
+    return self._fills.get(name, [None])[-1]
+
+  def first_fill_after(self, name, revnum):
+    """Return the Subversion revision number of the first fill of
+    NAME after REVNUM, or None if NAME had no fills after REVNUM."""
+
+    fills = self._fills.get(name)
+    if not fills:
+      return None
+
+    i = bisect.bisect_right(fills, revnum)
+    if i == len(fills):
+      return None
+
+    return fills[i]
 
   def get_svn_revnum(self, cvs_rev_id):
     """Return the Subversion revision number in which CVS_REV_ID was
@@ -143,9 +163,11 @@ class PersistenceManager:
     for c_rev in cvs_revs:
       self.cvs2svn_db['%x' % (c_rev.id,)] = svn_revnum
 
-    # If it is not a primary commit, then record last_filled.  name is
-    # allowed to be None.
+    # If it is not a primary commit, then record _fills.  name is
+    # allowed to be None (but why bother filling _fills in that
+    # case?).
     if name or motivating_revnum:
-      self.last_filled[name] = svn_revnum
+      self._fills.setdefault(name, []).append(svn_revnum)
+
 
 

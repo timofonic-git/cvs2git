@@ -54,6 +54,13 @@ SYMBOL_OPENINGS_CLOSINGS_SORTED = 'cvs2svn-symbolic-names-s.txt'
 # the SYMBOL_OPENINGS_CLOSINGS.
 SYMBOL_CLOSINGS_TMP = 'cvs2svn-symbolic-names-closings-tmp.txt'
 
+# This file is a temporary file for storing "sibling" openings:
+# files where a branch and some other symbolic name open simultaneously,
+# and we may want to fill the symbolic name from the branch.  They
+# are written while processing CVSRevisions in AggregateRevsPass, and then
+# read back in once we know the fill revision for the branch.
+SYMBOL_BRANCHINGS_TMP = 'cvs2svn-symbolic-names-branchings-tmp.txt'
+
 # Skeleton version of an svn filesystem.
 # (These supersede and will eventually replace the two above.)
 # See class SVNRepositoryMirror for how these work.
@@ -92,6 +99,11 @@ SYMBOL_DB = 'cvs2svn-symbols.db'
 # branches, and a list of tags and branches that are defined on
 # revisions in the branch.  The fields are separated by spaces.
 SYMBOL_STATISTICS_LIST = 'cvs2svn-symbol-stats.txt'
+
+# A list of all symbol pairings.  Each line contains a tag name and the
+# branch which seems to be the most likely candidate for the source of
+# that tag.
+PAIRINGS_LIST = 'cvs2svn-pairings.txt'
 
 # These two databases provide a bidirectional mapping between
 # CVSRevision.ids (in hex) and Subversion revision numbers.

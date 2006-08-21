@@ -54,7 +54,7 @@ class CVSCommit:
     # Symbolic names for which the last source revision has already
     # been seen and for which the CVSRevisionAggregator has already
     # generated a fill SVNCommit.  See self.process_revisions().
-    self.done_symbols = [ ]
+    self.done_symbols = { }
 
     # Lists of CVSRevisions
     self.changes = [ ]
@@ -206,11 +206,12 @@ class CVSCommit:
         # been filled before, then fill it now.  Otherwise, no need to
         # fill it.
         if c_rev.op == OP_ADD:
-          return pm.last_filled.get(c_rev.lod.name, None) is None
+          return pm.last_filled(c_rev.lod.name) is None
         elif c_rev.op == OP_CHANGE:
-          return svn_revnum > pm.last_filled.get(c_rev.lod.name, 0)
+          last_filled = pm.last_filled(c_rev.lod.name)
+          return last_filled is None or svn_revnum > last_filled
         elif c_rev.op == OP_DELETE:
-          return pm.last_filled.get(c_rev.lod.name, None) is None
+          return pm.last_filled(c_rev.lod.name) is None
       return False
 
     for c_rev in self.changes + self.deletes:
@@ -245,21 +246,8 @@ class CVSCommit:
     for c_rev in self.changes:
       svn_commit.add_revision(c_rev)
       # Only make a change if we need to:
-      if c_rev.rev == "1.1.1.1" and not c_rev.deltatext_exists:
-        # When 1.1.1.1 has an empty deltatext, the explanation is
-        # almost always that we're looking at an imported file whose
-        # 1.1 and 1.1.1.1 are identical.  On such imports, CVS creates
-        # an RCS file where 1.1 has the content, and 1.1.1.1 has an
-        # empty deltatext, i.e, the same content as 1.1.  There's no
-        # reason to reflect this non-change in the repository, so we
-        # want to do nothing in this case.  (If we were really
-        # paranoid, we could make sure 1.1's log message is the
-        # CVS-generated "Initial revision\n", but I think the
-        # conditions above are strict enough.)
-        pass
-      else:
-        if c_rev.is_default_branch_revision():
-          self.default_branch_cvs_revisions.append(c_rev)
+      if c_rev.is_default_branch_revision():
+        self.default_branch_cvs_revisions.append(c_rev)
 
     for c_rev in self.deletes:
       # When a file is added on a branch, CVS not only adds the file
@@ -297,7 +285,8 @@ class CVSCommit:
 
     if not Ctx().trunk_only:
       for c_rev in self.revisions():
-        Ctx()._symbolings_logger.log_revision(c_rev, svn_commit.revnum)
+        Ctx()._symbolings_logger.log_revision(c_rev, svn_commit.revnum,
+                                              self.done_symbols)
 
   def _post_commit(self):
     """Generates any SVNCommits that we can perform now that _commit
@@ -309,14 +298,35 @@ class CVSCommit:
     CVS checkout.  Of course, in order to copy the path over, we may
     first need to delete the existing trunk there."""
 
-    # Only generate a commit if we have default branch revs
-    if len(self.default_branch_cvs_revisions):
+    # Only generate a commit if we have default branch revs which need
+    # to be copied.
+    nonempty_revs = [ ]
+    for c_rev in self.default_branch_cvs_revisions:
+      # Only make a change if we need to.  When 1.1.1.1 has an empty
+      # deltatext, the explanation is almost always that we're looking
+      # at an imported file whose 1.1 and 1.1.1.1 are identical.  On
+      # such imports, CVS creates an RCS file where 1.1 has the
+      # content, and 1.1.1.1 has an empty deltatext, i.e, the same
+      # content as 1.1.  There's no reason to reflect this non-change
+      # in the repository, so we want to do nothing in this case.  (If
+      # we were really paranoid, we could make sure 1.1's log message
+      # is the CVS-generated "Initial revision\n", but I think the
+      # conditions below are strict enough.)
+      if c_rev.rev == "1.1.1.1" and not c_rev.deltatext_exists:
+        Ctx()._symbolings_logger.log_default_branch_revision(c_rev,
+                                                             SVNCommit.revnum - 1)
+      else:
+        nonempty_revs.append (c_rev)
+
+    if len(nonempty_revs):
       # Generate an SVNCommit for all of our default branch c_revs.
       svn_commit = SVNCommit("post-commit default branch(es)")
       svn_commit.set_motivating_revnum(self.motivating_commit.revnum)
-      for c_rev in self.default_branch_cvs_revisions:
+      for c_rev in nonempty_revs:
         svn_commit.add_revision(c_rev)
         Ctx()._symbolings_logger.log_default_branch_closing(
+            c_rev, svn_commit.revnum)
+        Ctx()._symbolings_logger.log_default_branch_revision(
             c_rev, svn_commit.revnum)
       self.secondary_commits.append(svn_commit)
 

@@ -433,6 +433,17 @@ class SVNRepositoryMirror:
     sources.sort()
     copy_source = sources[0]
 
+    # If there are multiple sources with the same score, and one
+    # of them comes from the same prefix as the parent copy, be
+    # sure to use that one.
+    if parent_source_prefix is not None and copy_source.prefix != parent_source_prefix:
+      for source in sources[1:]:
+        if copy_source.score > source.score:
+          break
+        if source.prefix == parent_source_prefix:
+          copy_source = source
+          break
+
     src_path = path_join(copy_source.prefix, path)
     dest_path = path_join(dest_prefix, path)
 
@@ -487,7 +498,7 @@ class SVNRepositoryMirror:
       next_dest_key = dest_entries.get(src_key, None)
       self._fill(symbol_fill, dest_prefix, next_dest_key,
                  src_entries[src_key], path_join(path, src_key),
-                 copy_source.prefix, sources[0].revnum, prune_ok)
+                 copy_source.prefix, copy_source.revnum, prune_ok)
 
   def _synchronize_default_branch(self, svn_commit):
     """Propagate any changes that happened on a non-trunk default
@@ -535,7 +546,7 @@ class SVNRepositoryMirror:
       Log().verbose("Committing %d CVSRevision%s"
                     % (len(svn_commit.cvs_revs), plural))
       for cvs_rev in svn_commit.cvs_revs:
-        # See comment in CVSCommit._commit() for what this is all
+        # See comment in CVSCommit._post_commit() for what this is all
         # about.  Note that although asking self._path_exists() is
         # somewhat expensive, we only do it if the first two (cheap)
         # tests succeed first.

@@ -110,6 +110,8 @@ class CollectRevsPass(Pass):
 
   def register_artifacts(self):
     self._register_temp_file(config.SYMBOL_STATISTICS_LIST)
+    if not Ctx().trunk_only:
+      self._register_temp_file(config.PAIRINGS_LIST)
     self._register_temp_file(config.RESYNC_DATAFILE)
     self._register_temp_file(config.METADATA_DB)
     self._register_temp_file(config.CVS_FILES_DB)
@@ -425,12 +427,14 @@ class AggregateRevsPass(Pass):
   This pass was formerly known as pass5."""
 
   def register_artifacts(self):
-    self._register_temp_file(config.SYMBOL_OPENINGS_CLOSINGS)
-    self._register_temp_file(config.SYMBOL_CLOSINGS_TMP)
     self._register_temp_file(config.SVN_REVNUMS_TO_CVS_REVS)
     self._register_temp_file(config.CVS_REVS_TO_SVN_REVNUMS)
     if not Ctx().trunk_only:
+      self._register_temp_file(config.SYMBOL_OPENINGS_CLOSINGS)
+      self._register_temp_file(config.SYMBOL_CLOSINGS_TMP)
+      self._register_temp_file(config.SYMBOL_BRANCHINGS_TMP)
       self._register_temp_file_needed(config.SYMBOL_LAST_CVS_REVS_DB)
+      self._register_temp_file_needed(config.PAIRINGS_LIST)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_RESYNC_DB)
     self._register_temp_file_needed(config.SYMBOL_DB)
@@ -464,7 +468,7 @@ class SortSymbolsPass(Pass):
   def register_artifacts(self):
     if not Ctx().trunk_only:
       self._register_temp_file(config.SYMBOL_OPENINGS_CLOSINGS_SORTED)
-    self._register_temp_file_needed(config.SYMBOL_OPENINGS_CLOSINGS)
+      self._register_temp_file_needed(config.SYMBOL_OPENINGS_CLOSINGS)
 
   def run(self, stats_keeper):
     Log().quiet("Sorting symbolic name source revisions...")

@@ -28,6 +28,7 @@ from cvs2svn_lib.database import DB_OPEN_READ
 from cvs2svn_lib.line_of_development import Branch
 from cvs2svn_lib.cvs_item_database import CVSItemDatabase
 from cvs2svn_lib.svn_revision_range import SVNRevisionRange
+from cvs2svn_lib.pairings_database import PairingsDatabase
 
 
 # Constants used in SYMBOL_OPENINGS_CLOSINGS
@@ -76,6 +77,8 @@ class SymbolingsLogger:
         artifact_manager.get_temp_file(config.SYMBOL_OPENINGS_CLOSINGS), 'w')
     self.closings = open(
         artifact_manager.get_temp_file(config.SYMBOL_CLOSINGS_TMP), 'w')
+    self.branchings = open(
+        artifact_manager.get_temp_file(config.SYMBOL_BRANCHINGS_TMP), 'w')
 
     # This keys of this dictionary are *source* cvs_paths for which
     # we've encountered an 'opening' on the default branch.  The
@@ -83,19 +86,73 @@ class SymbolingsLogger:
     # opened.
     self.open_paths_with_default_branches = { }
 
-  def log_revision(self, c_rev, svn_revnum):
+    # Use this to choose which branches to record extra openings for.
+    self.pairings_db = PairingsDatabase(DB_OPEN_READ)
+
+    # Use this to get the c_rev for previous revisions in log_revision,
+    # and for each revision handled in close.
+    self.cvs_items_db = CVSItemDatabase(
+        artifact_manager.get_temp_file(config.CVS_ITEMS_RESYNC_DB),
+        DB_OPEN_READ)
+
+  def log_default_branch_revision(self, c_rev, svn_revnum):
+    """Log a default branch revision.  The revision has already been logged
+    for its branch; here we log it for the trunk also.  SVN_REVNUM is the
+    revision in which this branch will be copied to the trunk.  For
+    empty 1.1.1.1 revisions, SVN_REVNUM will be the revision in which C_REV
+    was added to the default branch; the revision in which it was added
+    to the trunk would work also.  We also record anything opened here
+    to be closed later."""
+
+    self._note_default_branch_opening(c_rev, c_rev.tags + c_rev.branches)
+
+    if c_rev.op != OP_DELETE:
+      for name in c_rev.tags + c_rev.branches:
+        self._log(name, svn_revnum, c_rev.cvs_file.id, None, OPENING)
+
+  def log_revision(self, c_rev, svn_revnum, done_symbols):
     """Log any openings found in C_REV, and if C_REV.next_id is not
     None, a closing.  The opening uses SVN_REVNUM, but the closing (if
-    any) will have its revnum determined later."""
+    any) will have its revnum determined later.  Also log any openings
+    and closings from secondary sources (based on the pairings
+    database).  DONE_SYMBOLS has an entry for every symbol which has
+    already undergone its final fill, i.e. does not need any more
+    closings logged."""
+
+    if c_rev.prev_id is None:
+      # Names opened at 1.1 may be closed by a default revision later, so
+      # make sure to record them.
+      self._note_default_branch_opening(c_rev, c_rev.tags + c_rev.branches)
+    elif not isinstance(c_rev.lod, Branch):
+      # Any other trunk revision closes everything opened by default branches.
+      self.log_default_branch_closing(c_rev, svn_revnum)
 
     for name in c_rev.tags + c_rev.branches:
-      self._note_default_branch_opening(c_rev, name)
       if c_rev.op != OP_DELETE:
+        # Log this opening.
         self._log(
             name, svn_revnum,
-            c_rev.cvs_file,
+            c_rev.cvs_file.id,
             isinstance(c_rev.lod, Branch) and c_rev.lod.name,
             OPENING)
+
+        # We also want to record any promising "openings" on branches
+        # created at this same point; if a branch and a tag both open from
+        # a trunk revision, we can copy the tag from trunk or from the
+        # branch.  This is useful because in some other file the tag might
+        # open from the branch, with an intervening commit.  We only log
+        # the single branch most likely to be useful - logging all
+        # possible branches improves copy selections marginally, but slows
+        # us down a great deal.  We have to log these to a separate file,
+        # because the branch has not been opened yet; we don't know the
+        # SVN revision at which the branch copy of this file becomes
+        # available until we've processed the branch.
+        if c_rev.branches:
+          # Find the best candidate branch to open NAME.
+          best_branch = self.pairings_db.tags.get(name)
+          if best_branch in c_rev.branches:
+            self.branchings.write('%x %d %s %s\n' %
+                                  (c_rev.cvs_file.id, svn_revnum, name, best_branch))
 
       # If our c_rev has a next_rev, then that's the closing rev for
       # this source revision.  Log it to closings for later processing
@@ -103,7 +160,28 @@ class SymbolingsLogger:
       if c_rev.next_id is not None:
         self.closings.write('%s %x\n' % (name, c_rev.next_id))
 
-  def _log(self, name, svn_revnum, cvs_file, branch_name, type):
+    # Close any openings generated on secondary branches (by the code
+    # above, for the previous revision).  The database access for
+    # prev_id is a bit expensive, but logging the information with
+    # each revision would be even worse, and we need the name of the
+    # opened symbol.
+    if c_rev.prev_id and c_rev.first_on_branch:
+      print 'this:', c_rev.rev, 'rev: ', c_rev.prev_id, 'type:', type(c_rev.prev_id)
+      prev_rev = self.cvs_items_db[c_rev.prev_id]
+      if prev_rev.op != OP_DELETE:
+        for name in prev_rev.branches + prev_rev.tags:
+          # Only record a closing if we could have generated the opening.
+          best_branch = self.pairings_db.tags.get(name)
+          if best_branch != c_rev.lod.name:
+            continue
+
+          # If this symbol is already closed, then we don't need to log
+          # more closings for it (or read them in again later).
+          if name != c_rev.lod.name and not name in done_symbols:
+            self._log(name, svn_revnum,
+                      c_rev.cvs_file.id, c_rev.lod.name, CLOSING)
+
+  def _log(self, name, svn_revnum, cvs_file_id, branch_name, type):
     """Write out a single line to the symbol_openings_closings file
     representing that SVN_REVNUM of SVN_FILE on BRANCH_NAME is either
     the opening or closing (TYPE) of NAME (a symbolic name).
@@ -114,17 +192,16 @@ class SymbolingsLogger:
     # 8 places gives us 999,999,999 SVN revs.  That *should* be enough.
     self.symbolings.write(
         '%s %.8d %s %s %x\n'
-        % (name, svn_revnum, type, branch_name or '*', cvs_file.id))
+        % (name, svn_revnum, type, branch_name or '*', cvs_file_id))
 
   def close(self):
     """Iterate through the closings file, lookup the svn_revnum for
     each closing CVSRevision, and write a proper line out to the
-    symbolings file."""
+    symbolings file unless the closing is past the last fill for
+    the symbol."""
 
-    # Use this to get the c_rev of our rev_key
-    cvs_items_db = CVSItemDatabase(
-        artifact_manager.get_temp_file(config.CVS_ITEMS_RESYNC_DB),
-        DB_OPEN_READ)
+    # Use this to check when symbols were last filled.
+    pm = Ctx()._persistence_manager
 
     self.closings.close()
     for line in fileinput.FileInput(
@@ -133,21 +210,50 @@ class SymbolingsLogger:
       rev_id = int(rev_key, 16)
       svn_revnum = Ctx()._persistence_manager.get_svn_revnum(rev_id)
 
-      c_rev = cvs_items_db[rev_id]
+      # Check whether this closing is too late to be useful, and skip
+      # it.  We should have an entry in last_filled for each symbol,
+      # but may not if all of the source revisions for a symbol were
+      # dead.
+      done_revnum = pm.last_filled(name)
+      if done_revnum and svn_revnum >= done_revnum:
+        continue
+
+      c_rev = self.cvs_items_db[rev_id]
       self._log(
           name, svn_revnum,
-          c_rev.cvs_file,
+          c_rev.cvs_file.id,
           isinstance(c_rev.lod, Branch) and c_rev.lod.name,
           CLOSING)
 
+    self.branchings.close()
+    for line in fileinput.FileInput(
+            artifact_manager.get_temp_file(config.SYMBOL_BRANCHINGS_TMP)):
+      (cvs_file_id, svn_revnum, name, best_branch) = line.rstrip().split(" ")
+      cvs_file_id = int(cvs_file_id, 16)
+      svn_revnum = int(svn_revnum)
+
+      done_revnum = pm.last_filled(name)
+      if done_revnum is None:
+        continue
+
+      # Record the first fill of BEST_BRANCH after the creation of this
+      # revision as an opening for NAME; that will be when the revision
+      # was copied to the branch.  By the following fill it may have
+      # already had a closing on the branch.
+      branch_revnum = pm.first_fill_after(best_branch, svn_revnum)
+      if branch_revnum is None or branch_revnum >= done_revnum:
+        continue
+
+      self._log(name, branch_revnum, cvs_file_id, best_branch, OPENING)
+
     self.symbolings.close()
 
-  def _note_default_branch_opening(self, c_rev, symbolic_name):
+  def _note_default_branch_opening(self, c_rev, symbolic_names):
     """If C_REV is a default branch revision, log C_REV.cvs_path as an
-    opening for SYMBOLIC_NAME."""
+    opening for each item in SYMBOLIC_NAMES."""
 
     self.open_paths_with_default_branches.setdefault(
-        c_rev.cvs_path, []).append(symbolic_name)
+        c_rev.cvs_path, []).extend(symbolic_names)
 
   def log_default_branch_closing(self, c_rev, svn_revnum):
     """If self.open_paths_with_default_branches contains
@@ -159,7 +265,7 @@ class SymbolingsLogger:
     if self.open_paths_with_default_branches.has_key(path):
       # log each symbol as a closing
       for name in self.open_paths_with_default_branches[path]:
-        self._log(name, svn_revnum, c_rev.cvs_file, None, CLOSING)
+        self._log(name, svn_revnum, c_rev.cvs_file.id, None, CLOSING)
       # Remove them from the openings list as we're done with them.
       del self.open_paths_with_default_branches[path]
 

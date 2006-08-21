@@ -18,6 +18,7 @@
 
 
 from cvs2svn_lib.boolean import *
+from cvs2svn_lib.context import Ctx
 
 
 class FillSource:
@@ -40,10 +41,19 @@ class FillSource:
 
   def __cmp__(self, other):
     """Comparison operator used to sort FillSources in descending
-    score order."""
+    score order.  If the scores are the same, prefer trunk,
+    or alphabetical order by path - these cases are mostly
+    useful to stabilize testsuite results."""
 
     if self.score is None or other.score is None:
       raise TypeError, 'Tried to compare unscored FillSource'
-    return cmp(other.score, self.score)
+    elif other.score != self.score:
+      return cmp(other.score, self.score)
+    elif self.prefix == Ctx().project.trunk_path:
+      return -1
+    elif other.prefix == Ctx().project.trunk_path:
+      return 1
+    else:
+      return cmp(self.prefix, other.prefix)
 
 
