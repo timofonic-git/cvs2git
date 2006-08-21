@@ -20,7 +20,6 @@
 import os
 
 from cvs2svn_lib.boolean import *
-from cvs2svn_lib.set_support import *
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.log import Log
 
@@ -32,9 +31,9 @@ class Artifact:
   def __init__(self, name):
     self.name = name
 
-    # A set of passes that need this artifact.  This field is
-    # maintained by ArtifactManager.
-    self._passes_needed = set()
+    # A map { which_pass : None } of passes that need this artifact.
+    # This field is maintained by ArtifactManager.
+    self._passes_needed = { }
 
   def cleanup(self):
     """This artifact is no longer needed; clean it up."""
@@ -55,15 +54,6 @@ class TempFileArtifact(Artifact):
   def cleanup(self):
     Log().verbose("Deleting", self.filename)
     os.unlink(self.filename)
-
-
-class ArtifactNotActiveError(Exception):
-  """An artifact was requested when no passes that have registered
-  that they need it are active."""
-
-  def __init__(self, artifact_name):
-    Exception.__init__(
-        self, 'Artifact %s is not currently active' % artifact_name)
 
 
 class ArtifactManager:
@@ -88,14 +78,8 @@ class ArtifactManager:
   - Call pass_skipped() for any passes that were already executed
     during a previous cvs2svn run.
 
-  - Call pass_started() when a pass is about to start execution.
-
-  - If a pass that has been started will be continued during the next
-    program run, then call pass_continued().
-
-  - If a pass that has been started finishes execution, call
-    pass_done(), to allow any artifacts that won't be needed anymore
-    to be cleaned up.
+  - Call pass_done() after a pass is executed, to allow any artifacts
+    that won't be needed anymore to be cleaned up.
 
   - Call pass_deferred() for any passes that have been deferred to a
     future cvs2svn run.
@@ -110,11 +94,8 @@ class ArtifactManager:
     self._artifacts = { }
 
     # A map { pass : set_of_artifacts }, where set_of_artifacts is a
-    # set of artifacts needed by the pass.
+    # map { artifact : None } of artifacts needed by the pass.
     self._pass_needs = { }
-
-    # A set of passes that are currently being executed.
-    self._active_passes = set()
 
   def register_artifact(self, artifact, which_pass):
     """Register a new ARTIFACT for management by this class.
@@ -136,19 +117,9 @@ class ArtifactManager:
 
   def get_artifact(self, artifact_name):
     """Return the artifact with the specified name.  If the artifact
-    does not currently exist, raise a KeyError.  If it is not
-    registered as being needed by one of the active passes, raise an
-    ArtifactNotActiveError."""
+    does not currently exist, raise a KeyError."""
 
-    artifact = self._artifacts[artifact_name]
-    for active_pass in self._active_passes:
-      if artifact in self._pass_needs[active_pass]:
-        # OK
-        break
-    else:
-      raise ArtifactNotActiveError(artifact_name)
-
-    return artifact
+    return self._artifacts[artifact_name]
 
   def get_temp_file(self, basename):
     """Return the filename of the temporary file with the specified BASENAME.
@@ -162,12 +133,9 @@ class ArtifactManager:
     """Register that WHICH_PASS needs the artifact named ARTIFACT_NAME.
     An artifact with this name must already have been registered."""
 
-    artifact = self._artifacts[artifact_name]
-    artifact._passes_needed.add(which_pass)
-    if which_pass in self._pass_needs:
-      self._pass_needs[which_pass].add(artifact)
-    else:
-      self._pass_needs[which_pass] = set([artifact,])
+    artifact = self.get_artifact(artifact_name)
+    artifact._passes_needed[which_pass] = None
+    self._pass_needs.setdefault(which_pass, {})[artifact] = None
 
   def register_temp_file_needed(self, basename, which_pass):
     """Register that the temporary file with base name BASENAME is
@@ -181,7 +149,7 @@ class ArtifactManager:
     Return a list of artifacts that are no longer needed at all."""
 
     try:
-      artifacts = list(self._pass_needs[which_pass])
+      artifacts = self._pass_needs[which_pass].keys()
     except KeyError:
       # No artifacts were needed for that pass:
       return []
@@ -190,8 +158,9 @@ class ArtifactManager:
 
     unneeded_artifacts = []
     for artifact in artifacts:
-      artifact._passes_needed.remove(which_pass)
+      del artifact._passes_needed[which_pass]
       if not artifact._passes_needed:
+        del self._artifacts[artifact.name]
         unneeded_artifacts.append(artifact)
 
     return unneeded_artifacts
@@ -205,25 +174,10 @@ class ArtifactManager:
 
     self._unregister_artifacts(which_pass)
 
-  def pass_started(self, which_pass):
-    """WHICH_PASS is starting."""
-
-    self._active_passes.add(which_pass)
-
-  def pass_continued(self, which_pass):
-    """WHICH_PASS, which has already been started, will be continued
-    during the next program run.  Unregister any artifacts that would
-    be cleaned up at the end of WHICH_PASS without actually cleaning
-    them up."""
-
-    self._active_passes.remove(which_pass)
-    self._unregister_artifacts(which_pass)
-
   def pass_done(self, which_pass):
     """WHICH_PASS is done.  Clean up all artifacts that are no longer
     needed."""
 
-    self._active_passes.remove(which_pass)
     artifacts = self._unregister_artifacts(which_pass)
     if not Ctx().skip_cleanup:
       for artifact in artifacts:
@@ -242,15 +196,10 @@ class ArtifactManager:
     consistency check, that no artifacts were registered under
     nonexistent passes.)"""
 
-    unclean_artifact_names = [
-        artifact.name
-        for artifact in self._artifacts.values()
-        if artifact._passes_needed]
-
-    if unclean_artifact_names:
+    if self._artifacts:
       Log().warn(
           'INTERNAL: The following artifacts were not cleaned up:\n    %s\n'
-          % ('\n    '.join(unclean_artifact_names)))
+          % ('\n    '.join([artifact.name for artifact in self._artifacts])))
 
 
 # The default ArtifactManager instance:

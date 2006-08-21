@@ -69,11 +69,11 @@ _FileDataCollector.set_revision_info(), which writes a record to
 Also, for resync'd revisions, a line like this is written out to
 'cvs2svn-resync.txt':
 
-   3d6c1329 18a 3d6c1328
+   3d6c1329 18a215a05abea1c6c155dcc7283b88ae7ce23502 3d6c1328
 
 The fields are:
 
-   NEW_TIMESTAMP   METADATA_ID   OLD_TIMESTAMP
+   NEW_TIMESTAMP   DIGEST   OLD_TIMESTAMP
 
 (The resync file will be explained later.)
 
@@ -95,25 +95,8 @@ When every CVS file is done, CollectRevsPass is complete, and:
    - 'cvs2svn-resync.txt' contains a small amount of resync data, in
      no particular order.
 
-   - 'cvs2svn-symbol-stats.pck' contains a pickled list of symbol
-     statistics entries (instances of
-     cvs2svn_lib.symbol_statistics._Stats) for each symbol that was
-     seen in the CVS repository.  This includes the following
-     information:
-
-         ID NAME TAG_COUNT BRANCH_COUNT BRANCH_COMMIT_COUNT BLOCKERS
-
-     where ID is a unique integer identifying this symbol, NAME is the
-     symbol name, TAG_COUNT and BRANCH_COUNT are the number of CVS
-     files on which this symbol was used as a tag or branch
-     respectively, and BRANCH_COMMIT_COUNT is the number of files for
-     which commits were made on a branch with the given name.
-     BLOCKERS is a list of other symbols that were defined on branches
-     named NAME.  (A symbol cannot be excluded if it has any blockers
-     that are not also being excluded.)  These data are used to look
-     for inconsistencies in the use of symbols under CVS and to decide
-     which symbols can be excluded or forced to be branches and/or
-     tags.
+   - 'cvs2svn-branches.txt' ???
+   - 'cvs2svn-tags.txt' ???
 
    - 'cvs2svn-metadata.db' contains information that will help
      determine what CVSRevisions might have been made together and
@@ -132,19 +115,6 @@ When every CVS file is done, CollectRevsPass is complete, and:
      metadata.  CVSRevision records include the metadata_id.
 
 
-CollateSymbolsPass
-==================
-
-Use the symbol statistics collected in CollectRevsPass and any
-command-line options to determine which symbols should be treated as
-branches, which as tags, and which symbols should be excluded from the
-conversion altogether.
-
-Create 'cvs2svn-symbols.pck', which contains a pickle of a list of
-BranchSymbol, TagSymbol, and ExcludedSymbol objects indicating how
-each symbol should be processed in the conversion.
-
-
 ResyncRevsPass (formerly called pass2)
 ==============
 
@@ -154,37 +124,36 @@ output the information from cvs2svn-cvs-items.db to a new file,
 as the original file, except for some resync'd timestamps.
 
 First, read the whole resync file into a hash table that maps each
-metadata_id to a list of lists.  Each sublist represents one of the
-timestamp adjustments from CollectRevsPass, and looks like this:
+author+log digest to a list of lists.  Each sublist represents one of
+the timestamp adjustments from CollectRevsPass, and looks like this:
 
    [old_time_lower, old_time_upper, new_time]
 
-The reason to map each metadata_id to a list of sublists, instead of
-to one list, is that sometimes you'll get the same metadata for
-unrelated commits (for example, the same author commits many times
-using the empty log message, or a log message that just says "Doc
-tweaks.").  So each metadata_id may need to "fan out" to cover
-multiple commits, but without accidentally unifying those commits.
+The reason to map each digest to a list of sublists, instead of to one
+list, is that sometimes you'll get the same digest for unrelated
+commits (for example, the same author commits many times using the
+empty log message, or a log message that just says "Doc tweaks.").  So
+each digest may need to "fan out" to cover multiple commits, but
+without accidentally unifying those commits.
 
 Now we loop over the CVSRevisions in 'cvs2svn-cvs-items.db', and for
 each record write a line to 'cvs2svn-data.c-revs.txt'.  Each line of
 this file looks like this:
 
-   3dc32955 5a 12ab
+   3dc32955 5afe9b4ba41843d8eb52ae7db47a43eaa9573254 12ab
 
 The fields are:
 
    1.  a fixed-width timestamp
-   2.  the metadata_id of the metadata (log message + author)
-       associated with this CVSRevision, as a hexadecimal string.
+   2.  a digest of the log message + author
    3.  the integer unique ID for this CVSRevision, as a hexadecimal
        string.
 
-Any CVSRevision record in 'cvs2svn-cvs-items.db' whose metadata_id
-matches some resync entry and appears to be part of the same commit as
-one of the sublists in that entry, gets tweaked.  The tweak is to
-adjust the commit time of the line to the new_time, which is taken
-from the resync hash and results from the adjustment described in
+Any CVSRevision records in 'cvs2svn-cvs-items.db' whose digest matches
+some resync entry and appear to be part of the same commit as one of
+the sublists in that entry, get tweaked.  The tweak is to adjust the
+commit time of the line to the new_time, which is taken from the
+resync hash and results from the adjustment described in
 CollectRevsPass.
 
 The way we figure out whether a given line needs to be tweaked is to
@@ -205,6 +174,9 @@ important enough to have a distinctive log message anyway, so does it
 really matter if a couple of them accidentally get unified?  Probably
 not.
 
+'cvs2svn-tags.db' ??? is also created during this pass, for
+undocumented purposes.
+
 
 SortRevsPass (formerly called pass3)
 ============
@@ -214,38 +186,38 @@ changes into single commits.
 
 It's very simple -- run 'sort' on 'cvs2svn-c-revs.txt', converting it
 to 'cvs2svn-s-revs.txt'.  Because of the way the data is laid out,
-this causes commits with the same metadata_id (that is, the same
-author and log message) to be grouped together.  Poof!  We now have
-the CVS changes grouped by logical commit.
+this causes commits with the same digest (that is, the same author and
+log message) to be grouped together.  Poof!  We now have the CVS
+changes grouped by logical commit.
 
 In some cases, the changes in a given commit may be interleaved with
 other commits that went on at the same time, because the sort gives
-precedence to date before metadata_id.  However, CreateDatabasesPass
-detects this by seeing that the metadata_id is different, and
-re-separates the commits.
+precedence to date before log digest.  However, CreateDatabasesPass
+detects this by seeing that the log digest is different, and
+reseparates the commits.
 
 
 CreateDatabasesPass (formerly called pass4):
 ===================
 
 Find and create a database containing the last CVS revision that is a
-source (also referred to as an "opening" revision) for each symbol.
-This will result in a database containing key-value pairs whose key is
-the id for a CVSRevision, and whose value is a list of symbol ids for
-which that CVSRevision is the last "opening."
+source (also referred to as an "opening" revision) for all symbolic
+names.  This will result in a database containing key-value pairs
+whose key is the id for a CVSRevision, and whose value is a list of
+symbolic names for which that CVSRevision is the last "opening."
 
 The format for this file is:
 
     'cvs2svn-symbol-last-cvs-revs.db':
          Key                      Value
-         CVS Revision ID          array of symbol ids
+         CVS Revision ID          array of Symbolic names
 
     For example:
 
-         5c                      --> [3, 8]
-         62                      --> [15]
-         4d                      --> [29, 5]
-         f                       --> [18, 12]
+         5c                      --> ['TAG11', 'BRANCH38']
+         62                      --> ['TAG39']
+         4d                      --> ['BRANCH48', 'BRANCH37']
+         f                       --> ['TAG320', 'TAG1178']
 
 
 AggregateRevsPass (formerly called pass5)
@@ -258,17 +230,21 @@ to a Subversion repository or to a dump file).
 
 This pass does the following:
 
-1. Creates a database file to map Subversion revision numbers to
-   SVNCommit instances ('cvs2svn-svn-commits.db').  Creates another
-   database file to map CVS Revisions to their Subversion Revision
-   numbers ('cvs2svn-cvs-revs-to-svn-revnums.db').
+1. Creates a database file to map Subversion Revision numbers to their
+   corresponding CVS Revisions ('cvs2svn-svn-revnums-to-cvs-revs.db').
+   Creates another database file to map CVS Revisions to their
+   Subversion Revision numbers ('cvs2svn-cvs-revs-to-svn-revnums.db').
 
 2. When a file is copied to a symbolic name in cvs2svn, there are a
    range of valid Subversion revisions that we can copy the file from.
    The first valid Subversion revision number for a symbolic name is
    called the "Opening", and the first *invalid* Subversion revision
    number encountered after the "Opening" is called the "Closing".  In
-   this pass, the SymbolingsLogger class writes out a line (for each
+   this pass, the SymbolingsLogger class writes one line to
+   'cvs2svn-symbolic-names.txt' per CVS file, per symbolic name, per
+   opening or closing.
+
+3. For each CVS Revision in s-revs, we write out a line (for each
    symbolic name that it opens) to cvs2svn-symbolic-names.txt if it is
    the first possible source revision (the "opening" revision) for a
    copy to create a branch or tag, or if it is the last possible
@@ -277,34 +253,36 @@ This pass does the following:
 
    The format of each line is:
 
-       SYMBOL_ID SVN_REVNUM TYPE BRANCH_ID CVS_FILE_ID
+       SYMBOLIC_NAME SVN_REVNUM TYPE BRANCH_NAME CVS_FILE_ID
 
    For example:
 
-       1c 00000234 O * 1a7
-       34 00000245 O * 1a9
-       18a 00000241 C 34 1a7
-       122 00000201 O 7e 1b3
+       MY_TAG1 234 O * 1a7
+       MY_BRANCH3 245 O * 1a9
+       MY_TAG1 241 C MY_BRANCH1 1a7
+       MY_BRANCH_BLAH 201 O MY_BRANCH1 1b3
 
    Here is what the columns mean:
 
-   SYMBOL_ID: The id of the branch or tag that starts or ends in this
-              CVS Revision (there can be multiples per CVS rev).
+   SYMBOLIC_NAME: The name of the branch or tag that starts or ends
+                  in this CVS Revision (there can be multiples per
+                  CVS rev).
 
    SVN_REVNUM: The Subversion revision number that is the opening or
-               closing for this SYMBOLIC_NAME.  This number is written
-               with a fixed number of digits so that the file sorts
-               correctly.
+               closing for this SYMBOLIC_NAME.
 
    TYPE: "O" for Openings and "C" for Closings.
 
-   BRANCH_ID: The id of the branch where this opening or closing
-              happened.  '*' denotes the default branch.
+   BRANCH_NAME: The (uncleaned) branch name where this opening or
+                closing happened.  '*' denotes the default branch.
 
    CVS_FILE_ID: The ID of the CVS file where this opening or closing
                 happened, in hexadecimal.
 
    See SymbolingsLogger for more details.
+
+4. Creates a file 'cvs2svn-symbolic-names-closings-tmp.txt' ??? for
+   undocumented purposes.
 
 
 SortSymbolsPass (formerly called pass6)
@@ -321,8 +299,8 @@ IndexSymbolsPass (formerly called pass7)
 
 This pass iterates through all the lines in
 'cvs2svn-symbolic-names-s.txt', writing out a database file
-('cvs2svn-symbolic-name-offsets.db') mapping SYMBOL_ID to the file
-offset in 'cvs2svn-symbolic-names-s.txt' where SYMBOL_ID is first
+('cvs2svn-symbolic-name-offsets.db') mapping SYMBOLIC_NAME to the file
+offset in 'cvs2svn-symbolic-names-s.txt' where SYMBOLIC_NAME is first
 encountered.  This will allow us to seek to the various offsets in the
 file and sequentially read only the openings and closings that we
 need.

@@ -22,8 +22,8 @@ from __future__ import generators
 import sys
 import os
 import time
+import fileinput
 import re
-import cPickle
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib import config
@@ -39,21 +39,13 @@ from cvs2svn_lib.database import DB_OPEN_NEW
 from cvs2svn_lib.database import DB_OPEN_READ
 from cvs2svn_lib.database import DB_OPEN_WRITE
 from cvs2svn_lib.cvs_file_database import CVSFileDatabase
-from cvs2svn_lib.metadata_database import MetadataDatabase
-from cvs2svn_lib.symbol import BranchSymbol
-from cvs2svn_lib.symbol import TagSymbol
-from cvs2svn_lib.symbol import ExcludedSymbol
-from cvs2svn_lib.symbol_database import SymbolDatabase
-from cvs2svn_lib.symbol_database import create_symbol_database
 from cvs2svn_lib.line_of_development import Branch
-from cvs2svn_lib.symbol_statistics import SymbolStatistics
+from cvs2svn_lib.symbol_statistics_collector import SymbolStatisticsCollector
 from cvs2svn_lib.cvs_item_database import CVSItemDatabase
 from cvs2svn_lib.last_symbolic_name_database import LastSymbolicNameDatabase
 from cvs2svn_lib.svn_commit import SVNCommit
-from cvs2svn_lib.openings_closings import SymbolingsLogger
 from cvs2svn_lib.cvs_revision_aggregator import CVSRevisionAggregator
 from cvs2svn_lib.svn_repository_mirror import SVNRepositoryMirror
-from cvs2svn_lib.svn_commit import SVNInitialProjectCommit
 from cvs2svn_lib.persistence_manager import PersistenceManager
 from cvs2svn_lib.dumpfile_delegate import DumpfileDelegate
 from cvs2svn_lib.repository_delegate import RepositoryDelegate
@@ -128,11 +120,10 @@ class CollectRevsPass(Pass):
     Log().quiet("Examining all CVS ',v' files...")
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_NEW)
     cd = CollectData(stats_keeper)
-    for project in Ctx().projects:
-      cd.process_project(project)
+    cd.process_project(Ctx().project)
     cd.write_symbol_stats()
 
-    if cd.fatal_errors:
+    if len(cd.fatal_errors) > 0:
       raise FatalException("Pass 1 complete.\n"
                            + "=" * 75 + "\n"
                            + "Error summary:\n"
@@ -144,36 +135,16 @@ class CollectRevsPass(Pass):
     Log().quiet("Done")
 
 
-class CollateSymbolsPass(Pass):
-  """Divide symbols into branches, tags, and excludes."""
-
-  def register_artifacts(self):
-    self._register_temp_file(config.SYMBOL_DB)
-    self._register_temp_file_needed(config.SYMBOL_STATISTICS_LIST)
-
-  def run(self, stats_keeper):
-    symbol_stats = SymbolStatistics()
-
-    symbols = Ctx().symbol_strategy.get_symbols(symbol_stats)
-
-    # Check the symbols for consistency and bail out if there were errors:
-    if symbols is None or symbol_stats.check_consistency(symbols):
-      sys.exit(1)
-
-    create_symbol_database(symbols)
-
-    Log().quiet("Done")
-
-
 class ResyncRevsPass(Pass):
   """Clean up the revision information.
 
   This pass was formerly known as pass2."""
 
   def register_artifacts(self):
+    self._register_temp_file(config.SYMBOL_DB)
     self._register_temp_file(config.CLEAN_REVS_DATAFILE)
     self._register_temp_file(config.CVS_ITEMS_RESYNC_DB)
-    self._register_temp_file_needed(config.SYMBOL_DB)
+    self._register_temp_file_needed(config.SYMBOL_STATISTICS_LIST)
     self._register_temp_file_needed(config.RESYNC_DATAFILE)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_DB)
@@ -203,7 +174,8 @@ class ResyncRevsPass(Pass):
     DELTA = config.COMMIT_THRESHOLD/2
 
     resync = { }
-    for line in file(artifact_manager.get_temp_file(config.RESYNC_DATAFILE)):
+    for line in fileinput.FileInput(
+            artifact_manager.get_temp_file(config.RESYNC_DATAFILE)):
       [t1, metadata_id, t2] = line.strip().split()
       t1 = int(t1, 16)
       metadata_id = int(metadata_id, 16)
@@ -216,29 +188,43 @@ class ResyncRevsPass(Pass):
 
     return resync
 
-  def update_symbols(self, c_rev):
-    """Update c_rev.branch_ids and c_rev.tag_ids based on self.symbol_db."""
+  def _get_non_excluded_symbols(self, symbols, excludes):
+    return [ symbol
+             for symbol in symbols
+             if symbol not in excludes ]
 
-    branch_ids = []
-    tag_ids = []
-    for id in c_rev.branch_ids + c_rev.tag_ids:
-      symbol = self.symbol_db.get_symbol(id)
-      if isinstance(symbol, BranchSymbol):
-        branch_ids.append(symbol.id)
-      elif isinstance(symbol, TagSymbol):
-        tag_ids.append(symbol.id)
-    c_rev.branch_ids = branch_ids
-    c_rev.tag_ids = tag_ids
+  def _force_tags(self, c_rev):
+    """Convert all branches in C_REV that are forced to be tags."""
+    for forced_tag in Ctx().forced_tags:
+      if forced_tag in c_rev.branches:
+        c_rev.branches.remove(forced_tag)
+        c_rev.tags.append(forced_tag)
+
+  def _force_branches(self, c_rev):
+    """Convert all tags in C_REV that are forced to be branches."""
+    for forced_branch in Ctx().forced_branches:
+      if forced_branch in c_rev.tags:
+        c_rev.tags.remove(forced_branch)
+        c_rev.branches.append(forced_branch)
 
   def run(self, stats_keeper):
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
-    self.symbol_db = SymbolDatabase()
-    Ctx()._symbol_db = self.symbol_db
     cvs_items_db = CVSItemDatabase(
         artifact_manager.get_temp_file(config.CVS_ITEMS_DB), DB_OPEN_WRITE)
     cvs_items_resync_db = CVSItemDatabase(
         artifact_manager.get_temp_file(config.CVS_ITEMS_RESYNC_DB),
         DB_OPEN_NEW)
+    symbol_stats = SymbolStatisticsCollector()
+    symbol_stats.read()
+
+    # Convert the list of regexps to a list of strings
+    excludes = symbol_stats.find_excluded_symbols(Ctx().excludes)
+
+    # Check the symbols for consistency and bail out if there were errors:
+    if symbol_stats.check_consistency(excludes):
+      sys.exit(1)
+
+    symbol_stats.create_symbol_database()
 
     Log().quiet("Re-synchronizing CVS revision timestamps...")
 
@@ -257,12 +243,6 @@ class ResyncRevsPass(Pass):
       c_rev_id = int(line.strip(), 16)
       c_rev = cvs_items_db[c_rev_id]
 
-      # Skip this entire revision if it's on an excluded branch
-      if isinstance(c_rev.lod, Branch):
-        symbol = self.symbol_db.get_symbol(c_rev.lod.id)
-        if isinstance(symbol, ExcludedSymbol):
-          continue
-
       if c_rev.prev_id is not None:
         prev_c_rev = cvs_items_db[c_rev.prev_id]
       else:
@@ -273,7 +253,15 @@ class ResyncRevsPass(Pass):
       else:
         next_c_rev = None
 
-      self.update_symbols(c_rev)
+      # Skip this entire revision if it's on an excluded branch
+      if isinstance(c_rev.lod, Branch) and c_rev.lod.name in excludes:
+        continue
+
+      c_rev.branches = self._get_non_excluded_symbols(c_rev.branches, excludes)
+      c_rev.tags = self._get_non_excluded_symbols(c_rev.tags, excludes)
+
+      self._force_tags(c_rev)
+      self._force_branches(c_rev)
 
       # see if this is "near" any of the resync records we have
       # recorded for this metadata_id [of the log message].
@@ -348,7 +336,7 @@ class ResyncRevsPass(Pass):
           record[1] = max(record[1],
                           c_rev.timestamp + config.COMMIT_THRESHOLD/2)
 
-          msg = "PASS3 RESYNC: '%s' (%s): old time='%s' delta=%ds" \
+          msg = "PASS2 RESYNC: '%s' (%s): old time='%s' delta=%ds" \
                 % (c_rev.cvs_path, c_rev.rev, time.ctime(c_rev.timestamp),
                    new_timestamp - c_rev.timestamp)
           Log().verbose(msg)
@@ -385,20 +373,8 @@ class CreateDatabasesPass(Pass):
     if not Ctx().trunk_only:
       self._register_temp_file(config.SYMBOL_LAST_CVS_REVS_DB)
     self._register_temp_file_needed(config.CVS_FILES_DB)
-    self._register_temp_file_needed(config.SYMBOL_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_RESYNC_DB)
     self._register_temp_file_needed(config.SORTED_REVS_DATAFILE)
-
-  def get_cvs_revs(self):
-    """Generator the CVSRevisions in SORTED_REVS_DATAFILE order."""
-
-    cvs_items_db = CVSItemDatabase(
-        artifact_manager.get_temp_file(config.CVS_ITEMS_RESYNC_DB),
-        DB_OPEN_READ)
-    for line in file(
-            artifact_manager.get_temp_file(config.SORTED_REVS_DATAFILE)):
-      c_rev_id = int(line.strip().split()[-1], 16)
-      yield cvs_items_db[c_rev_id]
 
   def run(self, stats_keeper):
     """If we're not doing a trunk-only conversion, generate the
@@ -407,16 +383,27 @@ class CreateDatabasesPass(Pass):
     revisions to the StatsKeeper."""
 
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
-    Ctx()._symbol_db = SymbolDatabase()
+
+    def get_cvs_revs():
+      """Generator that produces the CVSRevisions in
+      SORTED_REVS_DATAFILE order."""
+
+      cvs_items_db = CVSItemDatabase(
+          artifact_manager.get_temp_file(config.CVS_ITEMS_RESYNC_DB),
+          DB_OPEN_READ)
+      for line in fileinput.FileInput(
+              artifact_manager.get_temp_file(config.SORTED_REVS_DATAFILE)):
+        c_rev_id = int(line.strip().split()[-1], 16)
+        yield cvs_items_db[c_rev_id]
 
     if Ctx().trunk_only:
-      for c_rev in self.get_cvs_revs():
+      for c_rev in get_cvs_revs():
         stats_keeper.record_c_rev(c_rev)
     else:
       Log().quiet("Finding last CVS revisions for all symbolic names...")
       last_sym_name_db = LastSymbolicNameDatabase()
 
-      for c_rev in self.get_cvs_revs():
+      for c_rev in get_cvs_revs():
         last_sym_name_db.log_revision(c_rev)
         stats_keeper.record_c_rev(c_rev)
 
@@ -439,7 +426,8 @@ class AggregateRevsPass(Pass):
 
   def register_artifacts(self):
     self._register_temp_file(config.SYMBOL_OPENINGS_CLOSINGS)
-    self._register_temp_file(config.SVN_COMMITS_DB)
+    self._register_temp_file(config.SYMBOL_CLOSINGS_TMP)
+    self._register_temp_file(config.SVN_REVNUMS_TO_CVS_REVS)
     self._register_temp_file(config.CVS_REVS_TO_SVN_REVNUMS)
     if not Ctx().trunk_only:
       self._register_temp_file_needed(config.SYMBOL_LAST_CVS_REVS_DB)
@@ -453,17 +441,14 @@ class AggregateRevsPass(Pass):
     Log().quiet("Mapping CVS revisions to Subversion commits...")
 
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
-    Ctx()._symbol_db = SymbolDatabase()
-    Ctx()._metadata_db = MetadataDatabase(DB_OPEN_READ)
-    Ctx()._cvs_items_db = CVSItemDatabase(
+    cvs_items_db = CVSItemDatabase(
         artifact_manager.get_temp_file(config.CVS_ITEMS_RESYNC_DB),
         DB_OPEN_READ)
-    Ctx()._symbolings_logger = SymbolingsLogger()
     aggregator = CVSRevisionAggregator()
-    for line in file(
+    for line in fileinput.FileInput(
             artifact_manager.get_temp_file(config.SORTED_REVS_DATAFILE)):
       c_rev_id = int(line.strip().split()[-1], 16)
-      c_rev = Ctx()._cvs_items_db[c_rev_id]
+      c_rev = cvs_items_db[c_rev_id]
       if not (Ctx().trunk_only and isinstance(c_rev.lod, Branch)):
         aggregator.process_revision(c_rev)
     aggregator.flush()
@@ -498,47 +483,44 @@ class IndexSymbolsPass(Pass):
   def register_artifacts(self):
     if not Ctx().trunk_only:
       self._register_temp_file(config.SYMBOL_OFFSETS_DB)
-      self._register_temp_file_needed(config.SYMBOL_DB)
       self._register_temp_file_needed(config.SYMBOL_OPENINGS_CLOSINGS_SORTED)
-
-  def generate_offsets_for_symbolings(self):
-    """This function iterates through all the lines in
-    SYMBOL_OPENINGS_CLOSINGS_SORTED, writing out a file mapping
-    SYMBOLIC_NAME to the file offset in SYMBOL_OPENINGS_CLOSINGS_SORTED
-    where SYMBOLIC_NAME is first encountered.  This will allow us to
-    seek to the various offsets in the file and sequentially read only
-    the openings and closings that we need."""
-
-    offsets = {}
-
-    f = open(
-        artifact_manager.get_temp_file(
-            config.SYMBOL_OPENINGS_CLOSINGS_SORTED),
-        'r')
-    old_id = None
-    while True:
-      fpos = f.tell()
-      line = f.readline()
-      if not line:
-        break
-      id, svn_revnum, ignored = line.split(" ", 2)
-      id = int(id, 16)
-      if id != old_id:
-        Log().verbose(' ', Ctx()._symbol_db.get_symbol(id).name)
-        old_id = id
-        offsets[id] = fpos
-
-    offsets_db = file(
-        artifact_manager.get_temp_file(config.SYMBOL_OFFSETS_DB), 'wb')
-    cPickle.dump(offsets, offsets_db, -1)
-    offsets_db.close()
 
   def run(self, stats_keeper):
     Log().quiet("Determining offsets for all symbolic names...")
 
+    def generate_offsets_for_symbolings():
+      """This function iterates through all the lines in
+      SYMBOL_OPENINGS_CLOSINGS_SORTED, writing out a file mapping
+      SYMBOLIC_NAME to the file offset in SYMBOL_OPENINGS_CLOSINGS_SORTED
+      where SYMBOLIC_NAME is first encountered.  This will allow us to
+      seek to the various offsets in the file and sequentially read only
+      the openings and closings that we need."""
+
+      ###PERF This is a fine example of a db that can be in-memory and
+      #just flushed to disk when we're done.  Later, it can just be sucked
+      #back into memory.
+      offsets_db = Database(
+          artifact_manager.get_temp_file(config.SYMBOL_OFFSETS_DB),
+          DB_OPEN_NEW)
+
+      file = open(
+          artifact_manager.get_temp_file(
+              config.SYMBOL_OPENINGS_CLOSINGS_SORTED),
+          'r')
+      old_sym = ""
+      while 1:
+        fpos = file.tell()
+        line = file.readline()
+        if not line:
+          break
+        sym, svn_revnum, cvs_rev_key = line.split(" ", 2)
+        if sym != old_sym:
+          Log().verbose(" ", sym)
+          old_sym = sym
+          offsets_db[sym] = fpos
+
     if not Ctx().trunk_only:
-      Ctx()._symbol_db = SymbolDatabase()
-      self.generate_offsets_for_symbolings()
+      generate_offsets_for_symbolings()
     Log().quiet("Done.")
 
 
@@ -552,7 +534,7 @@ class OutputPass(Pass):
     self._register_temp_file_needed(config.CVS_ITEMS_RESYNC_DB)
     self._register_temp_file_needed(config.SYMBOL_DB)
     self._register_temp_file_needed(config.METADATA_DB)
-    self._register_temp_file_needed(config.SVN_COMMITS_DB)
+    self._register_temp_file_needed(config.SVN_REVNUMS_TO_CVS_REVS)
     self._register_temp_file_needed(config.CVS_REVS_TO_SVN_REVNUMS)
     if not Ctx().trunk_only:
       self._register_temp_file_needed(config.SYMBOL_OPENINGS_CLOSINGS_SORTED)
@@ -560,12 +542,7 @@ class OutputPass(Pass):
 
   def run(self, stats_keeper):
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
-    Ctx()._metadata_db = MetadataDatabase(DB_OPEN_READ)
-    Ctx()._cvs_items_db = CVSItemDatabase(
-        artifact_manager.get_temp_file(config.CVS_ITEMS_RESYNC_DB),
-        DB_OPEN_READ)
-    if not Ctx().trunk_only:
-      Ctx()._symbol_db = SymbolDatabase()
+    svncounter = 2 # Repository initialization is 1.
     repos = SVNRepositoryMirror()
     persistence_manager = PersistenceManager(DB_OPEN_READ)
 
@@ -580,22 +557,12 @@ class OutputPass(Pass):
 
     repos.add_delegate(StdoutDelegate(stats_keeper.svn_rev_count()))
 
-    svn_revnum = 2 # Repository initialization is 1.
-
-    # Peek at the first revision to find the date to use to initialize
-    # the repository:
-    svn_commit = persistence_manager.get_svn_commit(svn_revnum)
-
-    # Initialize the repository by creating the directories for trunk,
-    # tags, and branches.
-    SVNInitialProjectCommit(svn_commit.date, 1).commit(repos)
-
-    while True:
-      svn_commit = persistence_manager.get_svn_commit(svn_revnum)
+    while 1:
+      svn_commit = persistence_manager.get_svn_commit(svncounter)
       if not svn_commit:
         break
-      svn_commit.commit(repos)
-      svn_revnum += 1
+      repos.commit(svn_commit)
+      svncounter += 1
 
     repos.finish()
 

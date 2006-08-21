@@ -32,23 +32,27 @@ RESYNC_DATAFILE = 'cvs2svn-resync.txt'
 # This file contains a marshalled copy of all the statistics that we
 # gather throughout the various runs of cvs2svn.  The data stored as a
 # marshalled dictionary.
-STATISTICS_FILE = 'cvs2svn-statistics.pck'
+STATISTICS_FILE = 'cvs2svn-statistics'
 
 # This text file contains records (1 per line) that describe svn
 # filesystem paths that are the opening and closing source revisions
 # for copies to tags and branches.  The format is as follows:
 #
-#     SYMBOL_ID SVN_REVNUM TYPE BRANCH_ID CVS_FILE_ID
+# SYMBOL_NAME SVN_REVNUM TYPE CVS_FILE_ID
 #
-# Where type is either OPENING or CLOSING.  The SYMBOL_ID and
+# Where type is either OPENING or CLOSING.  The SYMBOL_NAME and
 # SVN_REVNUM are the primary and secondary sorting criteria for
-# creating SYMBOL_OPENINGS_CLOSINGS_SORTED.  BRANCH_ID is the symbol
-# id of the branch where this opening or closing happened (in hex), or
-# '*' for the default branch.  CVS_FILE_ID is the id of the
-# corresponding CVSFile (in hex).
+# creating SYMBOL_OPENINGS_CLOSINGS_SORTED.  CVS_FILE_ID is the id of
+# the corresponding CVSFile (in hex).
 SYMBOL_OPENINGS_CLOSINGS = 'cvs2svn-symbolic-names.txt'
 # A sorted version of the above file.
 SYMBOL_OPENINGS_CLOSINGS_SORTED = 'cvs2svn-symbolic-names-s.txt'
+
+# This file is a temporary file for storing symbolic_name -> closing
+# CVSRevision until the end of our pass where we can look up the
+# corresponding SVNRevNum for the closing revs and write these out to
+# the SYMBOL_OPENINGS_CLOSINGS.
+SYMBOL_CLOSINGS_TMP = 'cvs2svn-symbolic-names-closings-tmp.txt'
 
 # Skeleton version of an svn filesystem.
 # (These supersede and will eventually replace the two above.)
@@ -56,18 +60,17 @@ SYMBOL_OPENINGS_CLOSINGS_SORTED = 'cvs2svn-symbolic-names-s.txt'
 SVN_MIRROR_REVISIONS_DB = 'cvs2svn-svn-revisions.db'
 SVN_MIRROR_NODES_DB = 'cvs2svn-svn-nodes.db'
 
-# Offsets pointing to the beginning of each symbol's records in
-# SYMBOL_OPENINGS_CLOSINGS_SORTED.  This file contains a pickled map
-# from symbol_id to file offset.
-SYMBOL_OFFSETS_DB = 'cvs2svn-symbol-offsets.pck'
+# Offsets pointing to the beginning of each SYMBOLIC_NAME in
+# SYMBOL_OPENINGS_CLOSINGS_SORTED
+SYMBOL_OFFSETS_DB = 'cvs2svn-symbolic-name-offsets.db'
 
-# Maps CVSRevision.ids (in hex) to lists of symbol ids, where the
-# CVSRevision is the last such that is a source for those symbols.
-# For example, if branch B's number is 1.3.0.2 in this CVS file, and
-# this file's 1.3 is the latest (by date) revision among *all* CVS
-# files that is a source for branch B, then the CVSRevision.id
-# corresponding to this file at 1.3 would list at least the symbol id
-# for branch B in its list.
+# Maps CVSRevision.ids (in hex) to lists of symbolic names, where the
+# CVSRevision is the last such that is a source for those symbolic
+# names.  For example, if branch B's number is 1.3.0.2 in this CVS
+# file, and this file's 1.3 is the latest (by date) revision among
+# *all* CVS files that is a source for branch B, then the
+# CVSRevision.id corresponding to this file at 1.3 would list at least
+# B in its list.
 SYMBOL_LAST_CVS_REVS_DB = 'cvs2svn-symbol-last-cvs-revs.db'
 
 # Maps CVSFile.id to instance.
@@ -79,14 +82,16 @@ CVS_ITEMS_DB = 'cvs2svn-cvs-items.db'
 # Maps CVSRevision.id (in hex) to CVSRevision after resynchronization.
 CVS_ITEMS_RESYNC_DB = 'cvs2svn-cvs-items-resync.db'
 
-# A record of all symbolic names that will be processed in the
-# conversion.  This file contains a pickled list of TypedSymbol
-# objects.
-SYMBOL_DB = 'cvs2svn-symbols.pck'
+# Lists all symbolic names that are tags.  Keys are strings (symbolic
+# names); values are ignorable.
+SYMBOL_DB = 'cvs2svn-symbols.db'
 
-# A pickled list of the statistics for all symbols.  Each entry in the
-# list is an instance of cvs2svn_lib.symbol_statistics._Stats.
-SYMBOL_STATISTICS_LIST = 'cvs2svn-symbol-stats.pck'
+# A list all symbols.  Each line consists of the symbol name, the
+# number of files in which it was used as a tag, the number of files
+# in which it was used as a branch, the number of commits to such
+# branches, and a list of tags and branches that are defined on
+# revisions in the branch.  The fields are separated by spaces.
+SYMBOL_STATISTICS_LIST = 'cvs2svn-symbol-stats.txt'
 
 # These two databases provide a bidirectional mapping between
 # CVSRevision.ids (in hex) and Subversion revision numbers.
@@ -94,10 +99,25 @@ SYMBOL_STATISTICS_LIST = 'cvs2svn-symbol-stats.pck'
 # The first maps CVSRevision.id to a number; the values are not
 # unique.
 #
-# The second maps Subversion revision numbers (as hex strings) to
-# pickled SVNCommit instances.
+# The second maps Subversion revision numbers to tuples (c_rev_ids,
+# motivating_revnum, symbolic_name, date).
+#
+# c_rev_ids is a list of CVSRevision.ids.
+#
+# If the SVNCommit is a default branch synchronization,
+# motivating_revnum is the svn_revnum of the primary SVNCommit that
+# motivated it; otherwise it is None.  (NOTE: Secondary commits that
+# fill branches and tags also have a motivating commit, but we do not
+# record it because it is (currently) not needed for anything.)
+# motivating_revnum is used when generating the log message for the
+# commit that synchronizes the default branch with trunk.
+#
+# symbolic_name is the symbolic name associated with the commit (if it
+# filled a symbolic name) or None otherwise.
+#
+# date is the date of the commit.
 CVS_REVS_TO_SVN_REVNUMS = 'cvs2svn-cvs-revs-to-svn-revnums.db'
-SVN_COMMITS_DB = 'cvs2svn-svn-commits.db'
+SVN_REVNUMS_TO_CVS_REVS = 'cvs2svn-svn-revnums-to-cvs-revs.db'
 
 # How many bytes to read at a time from a pipe.  128 kiB should be
 # large enough to be efficient without wasting too much memory.

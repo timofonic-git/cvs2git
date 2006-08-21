@@ -22,11 +22,9 @@ import md5
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib import config
-from cvs2svn_lib.common import CommandError
 from cvs2svn_lib.common import FatalError
 from cvs2svn_lib.common import OP_ADD
 from cvs2svn_lib.common import OP_CHANGE
-from cvs2svn_lib.common import to_utf8
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.svn_repository_mirror import SVNRepositoryMirrorDelegate
 
@@ -64,7 +62,7 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
       try:
         # Log messages can be converted with the 'replace' strategy,
         # but we can't afford any lossiness here.
-        pieces[i] = to_utf8(pieces[i], 'strict')
+        pieces[i] = Ctx().to_utf8(pieces[i], 'strict')
       except UnicodeError:
         raise FatalError(
             "Unable to convert a path '%s' to internal encoding.\n"
@@ -77,10 +75,10 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
 
     return 'K %d\n%s\nV %d\n%s\n' % (len(name), name, len(value), value)
 
-  def start_commit(self, revnum, revprops):
+  def start_commit(self, svn_commit):
     """Emit the start of SVN_COMMIT (an SVNCommit)."""
 
-    self.revision = revnum
+    self.revision = svn_commit.revnum
 
     # The start of a new commit typically looks like this:
     #
@@ -113,18 +111,18 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
     # are always the same for revisions.
 
     # Calculate the output needed for the property definitions.
-    prop_names = revprops.keys()
+    props = svn_commit.get_revprops()
+    prop_names = props.keys()
     prop_names.sort()
     prop_strings = []
     for propname in prop_names:
-      if revprops[propname] is not None:
-        prop_strings.append(
-            self._string_for_prop(propname, revprops[propname]))
+      if props[propname] is not None:
+        prop_strings.append(self._string_for_prop(propname, props[propname]))
 
     all_prop_strings = ''.join(prop_strings) + 'PROPS-END\n'
     total_len = len(all_prop_strings)
 
-    # Print the revision header and revprops
+    # Print the revision header and props
     self.dumpfile.write('Revision-number: %d\n'
                         'Prop-content-length: %d\n'
                         'Content-length: %d\n'
@@ -133,9 +131,6 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
 
     self.dumpfile.write(all_prop_strings)
     self.dumpfile.write('\n')
-
-  def end_commit(self):
-    pass
 
   def mkdir(self, path):
     """Emit the creation of directory PATH."""
@@ -213,8 +208,6 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
     if basename == ".cvsignore":
       ignore_vals = generate_ignores(c_rev)
       ignore_contents = '\n'.join(ignore_vals)
-      if ignore_contents:
-        ignore_contents += '\n'
       ignore_contents = ('K 10\nsvn:ignore\nV %d\n%s\n' % \
                          (len(ignore_contents), ignore_contents))
       ignore_contents += 'PROPS-END\n'
@@ -234,7 +227,7 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
     # If the file has keywords, we must prevent CVS/RCS from expanding
     # the keywords because they must be unexpanded in the repository,
     # or Subversion will get confused.
-    pipe_cmd, pipe = c_rev.cvs_file.project.cvs_repository.get_co_pipe(
+    pipe_cmd, pipe = Ctx().project.cvs_repository.get_co_pipe(
         c_rev, suppress_keyword_substitution=s_item.has_keywords)
 
     self.dumpfile.write('Node-path: %s\n'
@@ -276,7 +269,9 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
     error_output = pipe.stderr.read()
     exit_status = pipe.wait()
     if exit_status:
-      raise CommandError(pipe_cmd, exit_status, error_output)
+      raise FatalError("The command '%s' failed with exit status: %s\n"
+                       "and the following output:\n"
+                       "%s" % (pipe_cmd, exit_status, error_output))
 
     # Go back to patch up the length and checksum headers:
     self.dumpfile.seek(pos, 0)
@@ -339,7 +334,7 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
 
 def generate_ignores(c_rev):
   # Read in props
-  pipe_cmd, pipe = c_rev.cvs_file.project.cvs_repository.get_co_pipe(c_rev)
+  pipe_cmd, pipe = Ctx().project.cvs_repository.get_co_pipe(c_rev)
   buf = pipe.stdout.read(config.PIPE_READ_SIZE)
   raw_ignore_val = ""
   while buf:
@@ -349,7 +344,9 @@ def generate_ignores(c_rev):
   error_output = pipe.stderr.read()
   exit_status = pipe.wait()
   if exit_status:
-    raise CommandError(pipe_cmd, exit_status, error_output)
+    raise FatalError("The command '%s' failed with exit status: %s\n"
+                     "and the following output:\n"
+                     "%s" % (pipe_cmd, exit_status, error_output))
 
   # Tweak props: First, convert any spaces to newlines...
   raw_ignore_val = '\n'.join(raw_ignore_val.split())
@@ -389,7 +386,7 @@ class LF_EOL_Filter:
         buf = buf[:-1]
       buf = buf.replace('\r\n', '\n')
       buf = buf.replace('\r', '\n')
-      if buf or self.eof:
+      if len(buf) > 0 or self.eof:
         return buf
 
 

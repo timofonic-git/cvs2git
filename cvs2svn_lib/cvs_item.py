@@ -47,8 +47,7 @@ class CVSRevision(CVSItem):
                timestamp, metadata_id,
                prev_id, next_id,
                op, rev, deltatext_exists,
-               lod, first_on_branch, default_branch_revision,
-               tag_ids, branch_ids, closed_symbol_ids):
+               lod, first_on_branch, tags, branches):
     """Initialize a new CVSRevision object.
 
     Arguments:
@@ -63,13 +62,8 @@ class CVSRevision(CVSItem):
        DELTATEXT_EXISTS-->  (bool) true iff non-empty deltatext
        LOD             -->  (LineOfDevelopment) LOD where this rev occurred
        FIRST_ON_BRANCH -->  (bool) true iff the first rev on its branch
-       DEFAULT_BRANCH_REVISION --> (bool) true iff this is a default branch
-                                   revision
-       TAG_IDS         -->  (list of int) ids of all tags on this revision
-       BRANCH_IDS      -->  (list of int) ids of all branches rooted in this
-                            revision
-       CLOSED_SYMBOL_IDS --> (list of int) ids of all symbols closed by
-                             this revision
+       TAGS            -->  (list of strings) all tags on this revision
+       BRANCHES        -->  (list of strings) all branches rooted in this rev
     """
 
     CVSItem.__init__(self, id, cvs_file)
@@ -83,10 +77,8 @@ class CVSRevision(CVSItem):
     self.deltatext_exists = deltatext_exists
     self.lod = lod
     self.first_on_branch = first_on_branch
-    self.default_branch_revision = default_branch_revision
-    self.tag_ids = tag_ids
-    self.branch_ids = branch_ids
-    self.closed_symbol_ids = closed_symbol_ids
+    self.tags = tags
+    self.branches = branches
 
   def _get_cvs_path(self):
     return self.cvs_file.cvs_path
@@ -105,9 +97,9 @@ class CVSRevision(CVSItem):
     pickling CVSRevision instances."""
 
     if isinstance(self.lod, Branch):
-      lod_id = self.lod.id
+      lod_name = self.lod.name
     else:
-      lod_id = None
+      lod_name = None
 
     return (
         self.id, self.cvs_file.id,
@@ -116,35 +108,31 @@ class CVSRevision(CVSItem):
         self.op,
         self.rev,
         self.deltatext_exists,
-        lod_id,
+        lod_name,
         self.first_on_branch,
-        self.default_branch_revision,
-        ' '.join(['%x' % id for id in self.tag_ids]),
-        ' '.join(['%x' % id for id in self.branch_ids]),
-        ' '.join(['%x' % id for id in self.closed_symbol_ids]),)
+        ' '.join(self.tags),
+        ' '.join(self.branches),)
 
   def __setstate__(self, data):
     (self.id, cvs_file_id, self.timestamp, self.metadata_id,
      self.prev_id, self.next_id, self.op, self.rev,
-     self.deltatext_exists,
-     lod_id, self.first_on_branch, self.default_branch_revision,
-     tag_ids, branch_ids, closed_symbol_ids) = data
+     self.deltatext_exists, lod_name, self.first_on_branch,
+     tags, branches) = data
     self.cvs_file = Ctx()._cvs_file_db.get_file(cvs_file_id)
-    if lod_id is None:
+    if lod_name is None:
       self.lod = Trunk()
     else:
-      self.lod = Branch(Ctx()._symbol_db.get_symbol(lod_id))
-    self.tag_ids = [int(s, 16) for s in tag_ids.split()]
-    self.branch_ids = [int(s, 16) for s in branch_ids.split()]
-    self.closed_symbol_ids = [int(s, 16) for s in closed_symbol_ids.split()]
+      self.lod = Branch(lod_name)
+    self.tags = tags.split()
+    self.branches = branches.split()
 
-  def opens_symbol(self, symbol_id):
+  def opens_symbolic_name(self, name):
     """Return True iff this CVSRevision is the opening CVSRevision for
     NAME (for this RCS file)."""
 
-    if symbol_id in self.tag_ids:
+    if name in self.tags:
       return True
-    if symbol_id in self.branch_ids:
+    if name in self.branches:
       # If this c_rev opens a branch and our op is OP_DELETE, then
       # that means that the file that this c_rev belongs to was
       # created on the branch, so for all intents and purposes, this
@@ -154,10 +142,23 @@ class CVSRevision(CVSItem):
         return True
     return False
 
-  def __str__(self):
-    """For convenience only.  The format is subject to change at any time."""
+  def is_default_branch_revision(self):
+    """Return True iff SELF.rev of SELF.cvs_file is a default branch
+    revision."""
 
-    return '%s:%s<%x>' % (self.cvs_file, self.rev, self.id,)
+    val = self.cvs_file.default_branch
+    if val is not None:
+      val_last_dot = val.rindex(".")
+      our_last_dot = self.rev.rindex(".")
+      default_branch = val[:val_last_dot]
+      our_branch = self.rev[:our_last_dot]
+      default_rev_component = int(val[val_last_dot + 1:])
+      our_rev_component = int(self.rev[our_last_dot + 1:])
+      if (default_branch == our_branch
+          and our_rev_component <= default_rev_component):
+        return True
+
+    return False
 
 
 class CVSSymbol(CVSItem):

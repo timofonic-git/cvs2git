@@ -21,6 +21,7 @@ import os
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib import config
+from cvs2svn_lib.log import Log
 
 
 class Ctx:
@@ -36,45 +37,55 @@ class Ctx:
       return
     # Else, initialize to defaults.
     self.target = None
+    self.dumpfile = config.DUMPFILE
+    self.tmpdir = '.'
+    self.verbose = False
+    self.quiet = False
+    self.prune = True
     self.existing_svnrepos = False
     self.dump_only = False
-    self.dumpfile = config.DUMPFILE
     self.dry_run = False
-    self.use_cvs = False
-    self.svnadmin = "svnadmin"
     self.trunk_only = False
     self.trunk_base = "trunk"
-    self.branches_base = "branches"
     self.tags_base = "tags"
-    self.prune = True
+    self.branches_base = "branches"
     self.encoding = ["ascii"]
-    self.symbol_strategy = None
-    self.symbol_transforms = []
+    self.mime_types_file = None
+    self.auto_props_file = None
+    self.auto_props_ignore_case = False
+    self.no_default_eol = False
+    self.eol_from_mime_type = False
+    self.keywords_off = False
+    self.use_cvs = False
+    self.svnadmin = "svnadmin"
     self.username = None
-    self.fs_type = None
-    self.bdb_txn_nosync = False
-    self.svn_property_setters = []
-    self.tmpdir = '.'
+    self.print_help = False
     self.skip_cleanup = False
-    # A list of Project instances for all projects being converted.
-    self.projects = []
-
-  def add_project(self, project):
-    """Add a project to be converted."""
-
-    self.projects.append(project)
+    self.bdb_txn_nosync = False
+    self.fs_type = None
+    self.forced_branches = []
+    self.forced_tags = []
+    self.excludes = []
+    self.symbol_transforms = []
+    self.svn_property_setters = []
 
   def get_temp_filename(self, basename):
     return os.path.join(self.tmpdir, basename)
 
-  def clean(self):
-    """Dispose of items in our dictionary that are not intended to
-    live past the end of a pass (identified by exactly one leading
-    underscore)."""
+  def to_utf8(self, value, mode='replace'):
+    """Encode (as Unicode) VALUE, trying the encodings in self.encoding
+    as valid source encodings.  Raise UnicodeError on failure of all
+    source encodings."""
 
-    for attr in self.__dict__.keys():
-      if (attr.startswith('_') and not attr.startswith('__')
-          and not attr.startswith('_Ctx__')):
-        delattr(self, attr)
+    ### FIXME: The 'replace' default mode should be an option,
+    ### like --encoding is.
+    for encoding in self.encoding:
+      try:
+        return unicode(value, encoding, mode).encode('utf8')
+      except UnicodeError:
+        Log().verbose("Encoding '%s' failed for string '%s'"
+                      % (encoding, value))
+    raise UnicodeError
+
 
 

@@ -17,45 +17,69 @@
 """This module contains the SymbolDatabase class."""
 
 
-import cPickle
-
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib import config
 from cvs2svn_lib.artifact_manager import artifact_manager
+from cvs2svn_lib.database import DB_OPEN_READ
+from cvs2svn_lib.database import DB_OPEN_NEW
+from cvs2svn_lib.database import PDatabase
 
 
-class SymbolDatabase:
-  """Read-only access to symbol database.
+class Symbol:
+  def __init__(self, id, name):
+    self.id = id
+    self.name = name
 
-  This class allows lookups id -> symbol, where symbol is a
-  TypedSymbol instance.  The whole database is read into memory upon
-  construction."""
+
+class BranchSymbol(Symbol):
+  pass
+
+
+class TagSymbol(Symbol):
+  pass
+
+
+class _NewSymbolDatabase:
+  """A Database to record symbolic names (tags and branches).
+
+  Records are name -> symbol, where symbol is a Symbol instance."""
 
   def __init__(self):
-    # A map { id : TypedSymbol }
-    self._symbols = {}
+    self.db = PDatabase(
+        artifact_manager.get_temp_file(config.SYMBOL_DB), DB_OPEN_NEW)
 
-    f = open(artifact_manager.get_temp_file(config.SYMBOL_DB), 'rb')
-    symbols = cPickle.load(f)
-    f.close()
-    for symbol in symbols:
-      self._symbols[symbol.id] = symbol
-
-  def get_symbol(self, id):
-    """Return the symbol instance with id ID.
-
-    Raise KeyError if the symbol is not known."""
-
-    return self._symbols[id]
+  def add(self, symbol):
+    self.db[symbol.name] = symbol
 
 
-def create_symbol_database(symbols):
-  """Create and fill a symbol database.
+class _OldSymbolDatabase:
+  """Read-only access to symbol database.
 
-  Record each symbol that is listed in SYMBOLS, which is an iterable
-  containing TypedSymbol objects."""
+  Records are name -> symbol, where symbol is a Symbol instance.  The
+  whole database is read into memory upon construction."""
 
-  f = open(artifact_manager.get_temp_file(config.SYMBOL_DB), 'wb')
-  cPickle.dump(symbols, f, -1)
-  f.close()
+  def __init__(self):
+    self._names = {}
+    db = PDatabase(
+        artifact_manager.get_temp_file(config.SYMBOL_DB), DB_OPEN_READ)
+    for name in db.keys():
+      symbol = db[name]
+      self._names[name] = symbol
+
+  def get_symbol(self, name):
+    return self._names[name]
+
+
+def SymbolDatabase(mode):
+  """Open the SymbolDatabase in either NEW or READ mode.
+
+  The class of the instance that is returned depends on MODE."""
+
+  if mode == DB_OPEN_NEW:
+    return _NewSymbolDatabase()
+  elif mode == DB_OPEN_READ:
+    return _OldSymbolDatabase()
+  else:
+    raise NotImplemented
+
 

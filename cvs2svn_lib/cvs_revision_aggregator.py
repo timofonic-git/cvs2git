@@ -18,7 +18,6 @@
 
 
 from cvs2svn_lib.boolean import *
-from cvs2svn_lib.set_support import *
 from cvs2svn_lib import config
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.artifact_manager import artifact_manager
@@ -26,9 +25,11 @@ from cvs2svn_lib.database import Database
 from cvs2svn_lib.database import SDatabase
 from cvs2svn_lib.database import DB_OPEN_NEW
 from cvs2svn_lib.database import DB_OPEN_READ
+from cvs2svn_lib.openings_closings import SymbolingsLogger
 from cvs2svn_lib.persistence_manager import PersistenceManager
 from cvs2svn_lib.cvs_commit import CVSCommit
-from cvs2svn_lib.svn_commit import SVNSymbolCloseCommit
+from cvs2svn_lib.svn_commit import SVNCommit
+from cvs2svn_lib.metadata_database import MetadataDatabase
 
 
 class CVSRevisionAggregator:
@@ -58,6 +59,7 @@ class CVSRevisionAggregator:
   # underway in other directories.
 
   def __init__(self):
+    self._metadata_db = MetadataDatabase(DB_OPEN_READ)
     if not Ctx().trunk_only:
       self.last_revs_db = Database(
           artifact_manager.get_temp_file(config.SYMBOL_LAST_CVS_REVS_DB),
@@ -80,15 +82,16 @@ class CVSRevisionAggregator:
     # had to be adjusted to make it later than its dependencies.)
     self.ready_queue = [ ]
 
-    # A set of symbol ids for which the last source CVSRevision has
-    # already been processed but which haven't been closed yet.
-    self._pending_symbols = set()
+    # A map { symbol : None } of symbolic names for which the last
+    # source CVSRevision has already been processed but which haven't
+    # been closed yet.
+    self.pending_symbols = {}
 
-    # A set containing the symbol ids of closed symbols.  That is,
-    # we've already encountered the last CVSRevision that is a source
-    # for that symbol, the final fill for this symbol has been done,
-    # and we never need to fill it again.
-    self._done_symbols = set()
+    # A list of closed symbols.  That is, we've already encountered
+    # the last CVSRevision that is a source for that symbol, the final
+    # fill for this symbol has been done, and we never need to fill it
+    # again.
+    self.done_symbols = [ ]
 
     # This variable holds the most recently created primary svn_commit
     # object.  CVSRevisionAggregator maintains this variable merely
@@ -96,33 +99,25 @@ class CVSRevisionAggregator:
     # created in self._attempt_to_commit_symbols().
     self.latest_primary_svn_commit = None
 
+    Ctx()._symbolings_logger = SymbolingsLogger()
     Ctx()._persistence_manager = PersistenceManager(DB_OPEN_NEW)
 
-  def _get_deps(self, c_rev):
-    """Return the dependencies of C_REV.
+  def _get_deps(self, c_rev, deps):
+    """Add the CVSCommits that this C_REV depends on to DEPS, which is a
+    map { CVSCommit : None }.  The result includes both direct and indirect
+    dependencies, because it is used to determine what CVSCommit we can
+    be added to.  Return the commit C_REV depends on directly, if any;
+    otherwise return None."""
 
-    Return the tuple (MAIN_DEP, DEPS), where MAIN_DEP is the main
-    CVSCommit on which C_REV depends (or None if there is no main
-    dependency) and DEPS is the complete set of CVSCommit objects that
-    C_REV depends on directly or indirectly.  (The result includes
-    both direct and indirect dependencies because it is used to
-    determine what CVSCommit C_REV can be added to.)"""
-
-    main_dep = self.pending_revs.get(c_rev.prev_id)
-    if main_dep is None:
-      return (None, set(),)
-    deps = set([main_dep])
-    # CVSCommits whose revisions' dependencies still have to be examined:
-    todo = set([main_dep])
-    while todo:
-      dep = todo.pop()
-      for r in dep.revisions():
-        dep2 = self.pending_revs.get(r.prev_id)
-        if dep2 is not None and dep2 not in deps:
-          deps.add(dep2)
-          todo.add(dep2)
-
-    return (main_dep, deps,)
+    if c_rev.prev_id is None:
+      return None
+    dep = self.pending_revs.get(c_rev.prev_id, None)
+    if dep is None:
+      return None
+    deps[dep] = None
+    for r in dep.revisions():
+      self._get_deps(r, deps)
+    return dep
 
   def _extract_ready_commits(self, timestamp=None):
     """Extract any active commits that expire by TIMESTAMP from
@@ -165,7 +160,7 @@ class CVSRevisionAggregator:
               (timestamp is None or self.ready_queue[0].t_max < timestamp):
       cvs_commit = self.ready_queue.pop(0)
       self.latest_primary_svn_commit = \
-          cvs_commit.process_revisions(self._done_symbols)
+          cvs_commit.process_revisions(self.done_symbols)
       self._attempt_to_commit_symbols()
 
   def process_revision(self, c_rev):
@@ -174,16 +169,17 @@ class CVSRevisionAggregator:
     self._extract_ready_commits(c_rev.timestamp)
 
     # Add this item into the set of still-available commits.
-    (dep, deps) = self._get_deps(c_rev)
+    deps = {}
+    dep = self._get_deps(c_rev, deps)
     cvs_commits = self.cvs_commits.setdefault(c_rev.metadata_id, [])
     # This is pretty silly; it will add the revision to the oldest pending
     # commit. It might be wiser to do time range matching to avoid stretching
     # commits more than necessary.
     for cvs_commit in cvs_commits:
-      if cvs_commit not in deps:
+      if not deps.has_key(cvs_commit):
         break
     else:
-      author, log = Ctx()._metadata_db[c_rev.metadata_id]
+      author, log = self._metadata_db[c_rev.metadata_id]
       cvs_commit = CVSCommit(c_rev.metadata_id, author, log)
       cvs_commits.append(cvs_commit)
     if dep is not None:
@@ -211,7 +207,7 @@ class CVSRevisionAggregator:
       Ctx()._symbolings_logger.close()
 
   def _add_pending_symbols(self, c_rev):
-    """Add to self._pending_symbols any symbols from C_REV for which
+    """Add to self.pending_symbols any symbols from C_REV for which
     C_REV is the last CVSRevision.
 
     If we're not doing a trunk-only conversion, get the symbolic names
@@ -219,39 +215,39 @@ class CVSRevisionAggregator:
     to those left over from previous passes through the aggregator."""
 
     if not Ctx().trunk_only:
-      for symbol_id in self.last_revs_db.get('%x' % (c_rev.id,), []):
-        self._pending_symbols.add(symbol_id)
+      for sym in self.last_revs_db.get('%x' % (c_rev.id,), []):
+        self.pending_symbols[sym] = None
 
   def _attempt_to_commit_symbols(self):
-    """Generate one SVNCommit for each symbol in self._pending_symbols
+    """Generate one SVNCommit for each symbol in self.pending_symbols
     that doesn't have an opening CVSRevision in either
     self.cvs_commits, self.expired_queue or self.ready_queue."""
 
-    # Make a list of tuples (symbol_name, symbol) for all symbols from
-    # self._pending_symbols that do not have *source* CVSRevisions in
-    # the pending commit queues (self.expired_queue or
-    # self.ready_queue):
+    # Make a list of all symbols from self.pending_symbols that do not
+    # have *source* CVSRevisions in the pending commit queues
+    # (self.expired_queue or self.ready_queue):
     closeable_symbols = []
     pending_commits = self.expired_queue + self.ready_queue
     for commits in self.cvs_commits.itervalues():
       pending_commits.extend(commits)
-    for symbol_id in self._pending_symbols:
+    for sym in self.pending_symbols:
       for cvs_commit in pending_commits:
-        if cvs_commit.opens_symbol(symbol_id):
+        if cvs_commit.opens_symbolic_name(sym):
           break
       else:
-        symbol = Ctx()._symbol_db.get_symbol(symbol_id)
-        closeable_symbols.append( (symbol.name, symbol,) )
+        closeable_symbols.append(sym)
 
     # Sort the closeable symbols so that we will always process the
     # symbols in the same order, regardless of the order in which the
     # dict hashing algorithm hands them back to us.  We do this so
     # that our tests will get the same results on all platforms.
     closeable_symbols.sort()
-    for (symbol_name, symbol,) in closeable_symbols:
-      Ctx()._persistence_manager.put_svn_commit(
-          SVNSymbolCloseCommit(symbol, self.latest_primary_svn_commit.date))
-      self._done_symbols.add(symbol.id)
-      self._pending_symbols.remove(symbol.id)
+    for sym in closeable_symbols:
+      svn_commit = SVNCommit("closing tag/branch '%s'" % sym)
+      svn_commit.set_symbolic_name(sym)
+      svn_commit.set_date(self.latest_primary_svn_commit.get_date())
+      svn_commit.flush()
+      self.done_symbols.append(sym)
+      del self.pending_symbols[sym]
 
 

@@ -461,7 +461,7 @@ class Conversion:
       try:
         args.extend( [ '--bdb-txn-nosync', '-s', self._svnrepos, cvsrepos ] )
         if passbypass:
-          for p in range(1, 10):
+          for p in range(1, 9):
             run_cvs2svn(error_re, '-p', str(p), *args)
         else:
           run_cvs2svn(error_re, *args)
@@ -487,15 +487,9 @@ class Conversion:
         return self.logs[i]
     raise ValueError("Tag %s not found in logs" % tagname)
 
-  def get_wc(self, *args):
-    """Return the path to the svn working copy, or a path within the WC.
-
-    If a working copy has not been created yet, create it now.
-
-    If ARGS are specified, then they should be strings that form
-    fragments of a path within the WC.  They are joined using
-    os.path.join() and appended to the WC path."""
-
+  def get_wc(self):
+    """Return the path to the svn working copy.  If it has not been
+    created yet, create it now."""
     if self._wc_path is None:
       saved_wd = os.getcwd()
       try:
@@ -504,20 +498,12 @@ class Conversion:
         self._wc_path = os.path.join(tmp_dir, self._wc)
       finally:
         os.chdir(saved_wd)
-    return os.path.join(self._wc_path, *args)
+    return self._wc_path
 
   def get_wc_tree(self):
     if self._wc_tree is None:
       self._wc_tree = svntest.tree.build_tree_from_wc(self.get_wc(), 1)
     return self._wc_tree
-
-  def path_exists(self, *args):
-    """Return True if the specified path exists within the repository.
-
-    (The strings in ARGS are first joined into a path using
-    os.path.join().)"""
-
-    return os.path.exists(self.get_wc(*args))
 
   def check_props(self, keys, checks):
     """Helper function for checking lots of properties.  For a list of
@@ -592,7 +578,7 @@ def ensure_conversion(name, error_re=None, passbypass=None,
 
   conv_id = make_conversion_id(name, args, passbypass)
 
-  if conv_id not in already_converted:
+  if not already_converted.has_key(conv_id):
     try:
       # Run the conversion and store the result for the rest of this
       # session:
@@ -641,7 +627,8 @@ def attr_exec():
   if sys.platform == 'win32':
     raise svntest.Skip
   conv = ensure_conversion('main')
-  st = os.stat(conv.get_wc('trunk', 'single-files', 'attr-exec'))
+  st = os.stat(
+      os.path.join(conv.get_wc(), 'trunk', 'single-files', 'attr-exec'))
   if not st[0] & stat.S_IXUSR:
     raise svntest.Failure
 
@@ -649,7 +636,8 @@ def attr_exec():
 def space_fname():
   "conversion of filename with a space"
   conv = ensure_conversion('main')
-  if not conv.path_exists('trunk', 'single-files', 'space fname'):
+  if not os.path.exists(
+      os.path.join(conv.get_wc(), 'trunk', 'single-files', 'space fname')):
     raise svntest.Failure
 
 
@@ -1000,10 +988,17 @@ def split_time_branch():
 def multiple_tags():
   "multiple tags referring to same revision"
   conv = ensure_conversion('main')
-  if not conv.path_exists('tags', 'T_ALL_INITIAL_FILES', 'proj', 'default'):
+  if not os.path.exists(
+      os.path.join(
+          conv.get_wc(), 'tags', 'T_ALL_INITIAL_FILES', 'proj', 'default'
+          )
+      ):
     raise svntest.Failure
-  if not conv.path_exists(
-        'tags', 'T_ALL_INITIAL_FILES_BUT_ONE', 'proj', 'default'):
+  if not os.path.exists(
+      os.path.join(
+          conv.get_wc(), 'tags', 'T_ALL_INITIAL_FILES_BUT_ONE', 'proj', 'default'
+          )
+      ):
     raise svntest.Failure
 
 def bogus_tag():
@@ -1132,8 +1127,8 @@ def tagged_branch_and_trunk(**kw):
 
   tags = kw.get('tags', 'tags')
 
-  a_path = conv.get_wc(tags, 'some-tag', 'a.txt')
-  b_path = conv.get_wc(tags, 'some-tag', 'b.txt')
+  a_path = os.path.join(conv.get_wc(), tags, 'some-tag', 'a.txt')
+  b_path = os.path.join(conv.get_wc(), tags, 'some-tag', 'b.txt')
   if not (os.path.exists(a_path) and os.path.exists(b_path)):
     raise svntest.Failure
   if (open(a_path, 'r').read().find('1.24') == -1) \
@@ -1182,11 +1177,14 @@ def branch_delete_first(**kw):
   branches = kw.get('branches', 'branches')
 
   # 'file' was deleted from branch-1 and branch-2, but not branch-3
-  if conv.path_exists(branches, 'branch-1', 'file'):
+  if os.path.exists(
+        os.path.join(conv.get_wc(), branches, 'branch-1', 'file')):
     raise svntest.Failure
-  if conv.path_exists(branches, 'branch-2', 'file'):
+  if os.path.exists(
+        os.path.join(conv.get_wc(), branches, 'branch-2', 'file')):
     raise svntest.Failure
-  if not conv.path_exists(branches, 'branch-3', 'file'):
+  if not os.path.exists(
+        os.path.join(conv.get_wc(), branches, 'branch-3', 'file')):
     raise svntest.Failure
 
 
@@ -1658,7 +1656,7 @@ def file_in_attic_too():
     pass
 
 def symbolic_name_filling_guide():
-  "reveal a big bug in our SymbolFillingGuide"
+  "reveal a big bug in our SymbolicNameFillingGuide"
   # This will fail if the bug is present
   conv = ensure_conversion('symbolic-name-overfill')
 
@@ -1801,11 +1799,11 @@ def ignore():
   subdir_props = props_for_path(wc_tree, '/trunk/proj/subdir')
 
   if topdir_props['svn:ignore'] != \
-     '*.idx\n*.aux\n*.dvi\n*.log\nfoo\nbar\nbaz\nqux\n\n':
+     '*.idx\n*.aux\n*.dvi\n*.log\nfoo\nbar\nbaz\nqux\n':
     raise svntest.Failure
 
   if subdir_props['svn:ignore'] != \
-     '*.idx\n*.aux\n*.dvi\n*.log\nfoo\nbar\nbaz\nqux\n\n':
+     '*.idx\n*.aux\n*.dvi\n*.log\nfoo\nbar\nbaz\nqux\n':
     raise svntest.Failure
 
 
@@ -1814,8 +1812,10 @@ def requires_cvs():
   # See issues 4, 11, 29 for the bugs whose regression we're testing for.
   conv = ensure_conversion('requires-cvs', args=["--use-cvs"])
 
-  atsign_contents = file(conv.get_wc("trunk", "atsign-add")).read()
-  cl_contents = file(conv.get_wc("trunk", "client_lock.idl")).read()
+  atsign_contents = file(
+      os.path.join(conv.get_wc(), "trunk", "atsign-add")).read()
+  cl_contents = file(
+      os.path.join(conv.get_wc(), "trunk", "client_lock.idl")).read()
 
   if atsign_contents[-1:] == "@":
     raise svntest.Failure
@@ -2069,172 +2069,6 @@ def commit_dependencies():
     ))
 
 
-def double_branch_delete():
-  "fill branches before modifying files on them"
-  conv = ensure_conversion('double-branch-delete')
-
-  # Test for issue #102.  The file IMarshalledValue.java is branched,
-  # deleted, readded on the branch, and then deleted again.  If the
-  # fill for the file on the branch is postponed until after the
-  # modification, the file will end up live on the branch instead of
-  # dead!  Make sure it happens at the right time.
-
-  conv.logs[6].check(sym_log_msg('Branch_4_0'), (
-    ('/%(branches)s/Branch_4_0/IMarshalledValue.java '
-     '(from /%(trunk)s/IMarshalledValue.java:5)', 'A'),
-    ));
-
-  conv.logs[7].check('file IMarshalledValue.java was added on branch', (
-    ('/%(branches)s/Branch_4_0/IMarshalledValue.java', 'D'),
-    ));
-
-  conv.logs[8].check('JBAS-2436 - Adding LGPL Header2', (
-    ('/%(branches)s/Branch_4_0/IMarshalledValue.java', 'A'),
-    ));
-
-
-def symbol_mismatches():
-  "error for conflicting tag/branch"
-
-  try:
-    ensure_conversion('symbol-mess')
-    raise MissingErrorException
-  except svntest.Failure:
-    pass
-
-
-def force_symbols():
-  "force symbols to be tags/branches"
-
-  conv = ensure_conversion(
-      'symbol-mess',
-      args=['--force-branch=MOSTLY_BRANCH', '--force-tag=MOSTLY_TAG'])
-  if conv.path_exists('tags', 'BRANCH') \
-     or not conv.path_exists('branches', 'BRANCH'):
-     raise svntest.Failure
-  if not conv.path_exists('tags', 'TAG') \
-     or conv.path_exists('branches', 'TAG'):
-     raise svntest.Failure
-  if conv.path_exists('tags', 'MOSTLY_BRANCH') \
-     or not conv.path_exists('branches', 'MOSTLY_BRANCH'):
-     raise svntest.Failure
-  if not conv.path_exists('tags', 'MOSTLY_TAG') \
-     or conv.path_exists('branches', 'MOSTLY_TAG'):
-     raise svntest.Failure
-
-
-def commit_blocks_tags():
-  "commit prevents forced tag"
-
-  basic_args = ['--force-branch=MOSTLY_BRANCH', '--force-tag=MOSTLY_TAG']
-  try:
-    ensure_conversion(
-        'symbol-mess',
-        args=(basic_args + ['--force-tag=BRANCH_WITH_COMMIT']))
-    raise MissingErrorException
-  except svntest.Failure:
-    pass
-
-
-def blocked_excludes():
-  "error for blocked excludes"
-
-  basic_args = ['--force-branch=MOSTLY_BRANCH', '--force-tag=MOSTLY_TAG']
-  for blocker in ['BRANCH', 'COMMIT', 'UNNAMED']:
-    try:
-      ensure_conversion(
-          'symbol-mess',
-          args=(basic_args + ['--exclude=BLOCKED_BY_%s' % blocker]))
-      raise MissingErrorException
-    except svntest.Failure:
-      pass
-
-
-def unblock_blocked_excludes():
-  "excluding blocker removes blockage"
-
-  basic_args = ['--force-branch=MOSTLY_BRANCH', '--force-tag=MOSTLY_TAG']
-  for blocker in ['BRANCH', 'COMMIT']:
-    ensure_conversion(
-        'symbol-mess',
-        args=(basic_args + ['--exclude=BLOCKED_BY_%s' % blocker,
-                            '--exclude=BLOCKING_%s' % blocker]))
-
-
-def regexp_force_symbols():
-  "force symbols via regular expressions"
-
-  conv = ensure_conversion(
-      'symbol-mess',
-      args=['--force-branch=MOST.*_BRANCH', '--force-tag=MOST.*_TAG'])
-  if conv.path_exists('tags', 'MOSTLY_BRANCH') \
-     or not conv.path_exists('branches', 'MOSTLY_BRANCH'):
-     raise svntest.Failure
-  if not conv.path_exists('tags', 'MOSTLY_TAG') \
-     or conv.path_exists('branches', 'MOSTLY_TAG'):
-     raise svntest.Failure
-
-
-def heuristic_symbol_default():
-  "test 'heuristic' symbol default"
-
-  conv = ensure_conversion(
-      'symbol-mess', args=['--symbol-default=heuristic'])
-  if conv.path_exists('tags', 'MOSTLY_BRANCH') \
-     or not conv.path_exists('branches', 'MOSTLY_BRANCH'):
-     raise svntest.Failure
-  if not conv.path_exists('tags', 'MOSTLY_TAG') \
-     or conv.path_exists('branches', 'MOSTLY_TAG'):
-     raise svntest.Failure
-
-
-def branch_symbol_default():
-  "test 'branch' symbol default"
-
-  conv = ensure_conversion(
-      'symbol-mess', args=['--symbol-default=branch'])
-  if conv.path_exists('tags', 'MOSTLY_BRANCH') \
-     or not conv.path_exists('branches', 'MOSTLY_BRANCH'):
-     raise svntest.Failure
-  if conv.path_exists('tags', 'MOSTLY_TAG') \
-     or not conv.path_exists('branches', 'MOSTLY_TAG'):
-     raise svntest.Failure
-
-
-def tag_symbol_default():
-  "test 'tag' symbol default"
-
-  conv = ensure_conversion(
-      'symbol-mess', args=['--symbol-default=tag'])
-  if not conv.path_exists('tags', 'MOSTLY_BRANCH') \
-     or conv.path_exists('branches', 'MOSTLY_BRANCH'):
-     raise svntest.Failure
-  if not conv.path_exists('tags', 'MOSTLY_TAG') \
-     or conv.path_exists('branches', 'MOSTLY_TAG'):
-     raise svntest.Failure
-
-
-def issue_99():
-  "test problem from issue 99"
-
-  conv = ensure_conversion('issue-99')
-
-
-def issue_100():
-  "test problem from issue 100"
-
-  conv = ensure_conversion('issue-100')
-  file1 = conv.get_wc('trunk', 'file1.txt')
-  if file(file1).read() != 'file1.txt<1.2>\n':
-    raise svntest.Failure
-
-
-def issue_106():
-  "test problem from issue 106"
-
-  conv = ensure_conversion('issue-106')
-
-
 #----------------------------------------------------------------------
 
 ########################################################################
@@ -2312,19 +2146,6 @@ test_list = [ None,
               commit_dependencies,
               show_help_passes,
               multiple_tags,                        # 70
-              double_branch_delete,
-              symbol_mismatches,
-              force_symbols,
-              commit_blocks_tags,
-              blocked_excludes,
-              unblock_blocked_excludes,
-              regexp_force_symbols,
-              heuristic_symbol_default,
-              branch_symbol_default,
-              tag_symbol_default,                   # 80
-              XFail(issue_99),
-              XFail(issue_100),
-              XFail(issue_106),
               ]
 
 if __name__ == '__main__':

@@ -63,7 +63,6 @@
          >http://www.gnu.org/software/coreutils/</a>.  Binaries for
     Win32 can be found at <a href="http://unxutils.sourceforge.net/"
                                   >http://unxutils.sourceforge.net/</a>.
-    Windows <tt>sort.exe</tt> is <b>not</b> adequate.
   </li>
 
 </ul>
@@ -303,7 +302,7 @@ directories) before running your conversion.
   </tr>
 
   <tr>
-    <td align="right"><tt>--help</tt>, <tt>-h</tt></td>
+    <td align="right"><tt>--help, -h</tt></td>
     <td>Print the usage message and exit with success.</td>
   </tr>
 
@@ -319,16 +318,15 @@ directories) before running your conversion.
   </tr>
 
   <tr>
-    <td align="right"><tt>--verbose</tt>, <tt>-v</tt></td>
-    <td>Tell cvs2svn to print <i>tons</i> of information about what
-      it's doing to STDOUT.</td>
+    <td align="right"><tt>-q</tt></td>
+    <td>Tell cvs2svn to operate in quiet mode, printing little more
+      than pass starts and stops to STDOUT.</td>
   </tr>
 
   <tr>
-    <td align="right"><tt>--quiet</tt>, <tt>-q</tt></td>
-    <td>Tell cvs2svn to operate in quiet mode, printing little more
-      than pass starts and stops to STDOUT.  This option may be
-      specified twice to suppress all non-error output.</td>
+    <td align="right"><tt>-v</tt></td>
+    <td>Tell cvs2svn to print <i>tons</i> of information about what
+      it's doing to STDOUT.</td>
   </tr>
 
   <tr>
@@ -354,21 +352,20 @@ directories) before running your conversion.
 
   <tr>
     <td align="right"><tt>--existing-svnrepos</tt></td>
-    <td>Load the converted CVS repository into an existing Subversion
-    repository, instead of creating a new repository.</td>
-  </tr>
-
-  <tr>
-    <td align="right"><tt>--dump-only</tt></td>
-    <td>Convert the CVS repository to a Subversion dumpfile instead of
-      a Subversion repository (useful for importing a CVS Repository
-      into an existing Subversion repository).</td>
+    <td>Only load the converted CVS repository into an existing
+      Subversion repository.</td>
   </tr>
 
   <tr>
     <td align="right"><tt>--dumpfile=PATH</tt></td>
-    <td>Set the PATH of the dumpfile. The default is
-    <tt>cvs2svn-dump</tt> in the current directory.</td>
+    <td>Convert the CVS repository into a Subversion dumpfile at PATH.</td>
+  </tr>
+
+  <tr>
+    <td align="right"><tt>--tmpdir=PATH</tt></td>
+    <td>Use the directory PATH for all of cvs2svn's temporary data
+      (which can be a <i>lot</i> of data.  The default value is the
+      current working directory.</td>
   </tr>
 
   <tr>
@@ -376,6 +373,12 @@ directories) before running your conversion.
     <td>Do not create a repository or a dumpfile; just print the details
       of what cvs2svn would do if it were really converting your
       repository.</td>
+  </tr>
+
+  <tr>
+    <td align="right"><tt>--profile</tt></td>
+    <td>Dump Python <a href="http://docs.python.org/lib/module-hotshot.html"
+        >Hotshot</a> profiling data to the file <tt>cvs2svn.hotshot</tt>.</td>
   </tr>
 
   <tr>
@@ -436,66 +439,11 @@ directories) before running your conversion.
   </tr>
 
   <tr>
-    <td align="right"><tt>--no-prune</tt></td>
-    <td>When all files are deleted from a directory in the Subversion
-      repository, don't delete the empty directory (the default is to
-      delete any empty directories.</td>
-  </tr>
-
-  <tr>
-    <td align="right"><tt>--encoding=ENC</tt></td>
-    <td>Use ENC as the encoding of log messages in CVS repos (default:
-      ascii)</td>
-  </tr>
-
-  <tr>
-    <td align="right"><tt>--force-branch=REGEXP</tt></td>
-    <td>Force symbols whose names match REGEXP to be branches.</td>
-  </tr>
-
-  <tr>
-    <td align="right"><tt>--force-tag=REGEXP</tt></td>
-    <td>Force symbols whose names match REGEXP to be tags.  This will
-      cause an error if such a symbol has commits on it.</td>
-  </tr>
-
-  <tr>
-    <td align="right"><tt>--exclude=REGEXP</tt></td>
-    <td>Exclude branches and tags whose names match REGEXP from
-      the conversion.</td>
-  </tr>
-
-  <tr>
-    <td align="right"><tt>--symbol-default=OPT</tt></td>
-    <td>Specify how to convert ambiguous symbols (i.e., those that
-      appear in the CVS archive as both branches and tags).
-      <tt>OPT</tt> is one of the following:<ul>
-        <li>"<tt>branch</tt>": Treat every ambiguous symbol as
-          a branch.</li>
-
-        <li>"<tt>tag</tt>": Treat every ambiguous symbols as a
-          tag.</li>
-
-        <li>"<tt>heuristic</tt>": Decide how to treat each
-          ambiguous symbol based on whether it was used more often as
-          a branch or tag in CVS.</li>
-
-        <li>"<tt>strict</tt>": No default; every ambiguous
-          symbol has to be resolved manually using
-          <tt>--force-branch</tt>, <tt>--force-tag</tt>, or
-          <tt>--exclude</tt>.  (This is the default behavior.)</li>
-
-      </ul>
-    </td>
-  </tr>
-
-  <tr>
     <td align="right"><tt>--symbol-transform=PAT:SUB</tt></td>
     <td><p>Transform RCS/CVS symbol names before entering them into
-      Subversion.  PAT is a Python regexp pattern and SUB is a
-      replacement pattern using Python's reference syntax.  You may
-      specify any number of these options; they will be
-      applied in the order given on the command line.</p>
+      Subversion. The PATtern and SUBstitution use Python regexp and reference
+      syntax. You may specify any number of these options; they will be
+      applied left to right in the order given on the command line.</p>
 
       <p>This option can be useful if you're converting a repository in
       which the developer used directory-wide symbol names like 1_0, 1_1
@@ -519,15 +467,52 @@ cvs2svn --symbol-transform='([0-9])-(.*):release-\1.\2' -q -s SVN RCS
   </tr>
 
   <tr>
+    <td align="right"><tt>--no-prune</tt></td>
+    <td>When all files are deleted from a directory in the Subversion
+      repository, don't delete the empty directory (the default is to
+      delete any empty directories.</td>
+  </tr>
+
+  <tr>
+    <td align="right"><tt>--dump-only</tt></td>
+    <td>Convert the CVS repository to a Subversion dumpfile instead of
+      a Subversion repository (useful for importing a CVS Repository
+      into an existing Subversion repository).</td>
+  </tr>
+
+  <tr>
+    <td align="right"><tt>--encoding=ENC</tt></td>
+    <td>Use ENC as the encoding of log messages in CVS repos (default:
+      ascii)</td>
+  </tr>
+
+  <tr>
+    <td align="right"><tt>--force-branch=NAME</tt></td>
+    <td>Force NAME to be a branch.</td>
+  </tr>
+
+  <tr>
+    <td align="right"><tt>--force-tag=NAME</tt></td>
+    <td>Force NAME to be a tag.  This will cause an error if NAME has
+      commits on it.</td>
+  </tr>
+
+  <tr>
+    <td align="right"><tt>--exclude=REGEXP</tt></td>
+    <td>Exclude branches and tags matching REGEXP from
+      conversion.</td>
+  </tr>
+
+  <tr>
     <td align="right"><tt>--username=NAME</tt></td>
     <td>Use NAME as the author for cvs2svn-synthesized commits (the
       default value is no author at all.</td>
   </tr>
 
   <tr>
-    <td align="right"><tt>--fs-type=TYPE</tt></td>
-    <td>Pass the <tt>--fs-type=TYPE</tt> option to "svnadmin
-      create" when creating a new repository.</td>
+    <td align="right"><tt>--skip-cleanup</tt></td>
+    <td>Prevent the deletion of the temporary files that cvs2svn
+      creates in the process of conversion.</td>
   </tr>
 
   <tr>
@@ -537,9 +522,15 @@ cvs2svn --symbol-transform='([0-9])-(.*):release-\1.\2' -q -s SVN RCS
   </tr>
 
   <tr>
+    <td align="right"><tt>--fs-type=TYPE</tt></td>
+    <td>Pass the <tt>--fs-type=TYPE</tt> option to "svnadmin
+      create" when creating a new repository.</td>
+  </tr>
+
+  <tr>
     <td align="right"><tt>--cvs-revnums</tt></td>
     <td>Record CVS revision numbers as file properties in the
-      Subversion repository.  (Note that unless it is removed
+      Subversion repository/dumpfile.  (Note that unless it is removed
       explicitly, the last CVS revision number will remain associated
       with the file even after the file is changed within
       Subversion.)</td>
@@ -599,25 +590,6 @@ cvs2svn --symbol-transform='([0-9])-(.*):release-\1.\2' -q -s SVN RCS
       <tt>svn:keywords</tt> for any file.  While this will not touch
       the keywords in the contents of your files, Subversion will not
       expand them.</td>
-  </tr>
-
-  <tr>
-    <td align="right"><tt>--tmpdir=PATH</tt></td>
-    <td>Use the directory PATH for all of cvs2svn's temporary data
-      (which can be a <i>lot</i> of data).  The default value is the
-      current working directory.</td>
-  </tr>
-
-  <tr>
-    <td align="right"><tt>--skip-cleanup</tt></td>
-    <td>Prevent the deletion of the temporary files that cvs2svn
-      creates in the process of conversion.</td>
-  </tr>
-
-  <tr>
-    <td align="right"><tt>--profile</tt></td>
-    <td>Dump Python <a href="http://docs.python.org/lib/module-hotshot.html"
-        >Hotshot</a> profiling data to the file <tt>cvs2svn.hotshot</tt>.</td>
   </tr>
 
 </table>

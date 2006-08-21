@@ -21,32 +21,15 @@
 
 <ol>
 
-  <li><a href="#oneatatime">How can I convert my CVS repository one
-    module at a time?</a></li>
-
-  <li><a href="#partialconversion">How can I convert part of a CVS
-    repository?</a></li>
-
-  <li><a href="#onetoone">How can I convert separate projects in my
-    CVS repository into a single Subversion repository?</a></li>
+  <li><a href="#oneatatime">How can I convert my CVS repository one module at a time?</a></li>
 
   <li><a href="#inverted">How can I convert project <tt>foo</tt> so
     that <tt>trunk/tags/branches</tt> are inside of
     <tt>foo</tt>?</a></li>
 
-</ol>
-
-<p><strong>Problems:</strong></p>
-
-<ol>
-
   <li><a href="#atticprob">I get an error "A CVS repository cannot
     contain both repo/path/file.txt,v and
     repo/path/Attic/file.txt,v".  What can I do?</a></li>
-
-  <li><a href="#rcsmissing">Using cvs2svn 1.3.x, I get an error "The
-    command '['co', '-q', '-x,v', '-p1.1', '-kk',
-    '/home/cvsroot/myfile,v']' failed" in pass 8.</a></li>
 
 </ol>
 
@@ -54,86 +37,28 @@
 
 <h2>How-to:</h2>
 
-<h3><a name="oneatatime" title="#oneatatime">How can I convert my CVS
-repository one module at a time?</a></h3>
+<h3><a name="oneatatime" title="#oneatatime">How can I convert my CVS repository one module at a time?</a></h3>
 
 <p>If you need to convert certain CVS modules (in one large
-repository) to Subversion <b>now</b> and other modules <b>later</b>,
-you may want to convert your repository one module at a time.  This
-situation is typically encountered in large organizations where each
-project has a separate lifecycle and schedule, and a one-step
-conversion process is not practical.
+repository) to Subversion
+<b>now</b> and other modules <b>later</b>, you may want to convert
+your repository one module at a time.  This situation is typically
+encountered in large organizations where each project has a separate
+lifecycle and schedule, and a one-step conversion process is not
+practical.
 </p>
 
-<p>First you have to decide whether you want to put your converted
-projects into a single Subversion repositories or multiple ones.  This
-decision mostly depends on the degree of coupling between the projects
-and is beyond the scope of this FAQ.  See <a
-href="http://svnbook.red-bean.com/en/1.2/svn.reposadmin.projects.html#svn.reposadmin.projects.chooselayout">the
-Subversion book</a> for a discussion of repository organization.
-</p>
-
-<p>If you decide to convert your projects into separate Subversion
-repositories, then please follow the instructions in <a
-href="#partialconversion">How can I convert part of a CVS
-repository?</a> once for each repository.
-</p>
-
-<p>If you decide to put more than one CVS project into a single
-Subversion repository, then please follow the instructions in <a
-href="#onetoone">How can I convert separate projects in my CVS
-repository into a single Subversion repository?</a>.
-</p>
-
-
-<h3><a name="partialconversion" title="#partialconversion">How can I
-convert part of a CVS repository?</a></h3>
-
-<p>This is easy: simply run cvs2svn normally, passing it the path of
-the project subdirectory within the CVS repository.  Since cvs2svn
-ignores any files outside of the path it is given, other projects
-within the CVS repository will be excluded from the conversion.
-</p>
-
-<p>Example: You have a CVS repository at path <tt>/path/cvsrepo</tt>
-with projects in subdirectories <tt>/path/cvsrepo/foo</tt> and
-<tt>/path/cvsrepo/bar</tt>, and you want to create a new Subversion
-repository at <tt>/path/foo-svn</tt> that includes only the
-<tt>foo</tt> project:
-</p>
-
-<pre>
-    $ cvs2svn -s /path/foo-svn /path/cvsrepo/foo
-</pre>
-
-
-
-<h3><a name="onetoone" title="#onetoone">How can I convert separate
-projects in my CVS repository into a single Subversion
-repository?</a></h3>
-
-<p>To convert multiple projects from a single CVS repository into a
-single Subversion repository, then you have to use cvs2svn once for
-each project, storing the output into a "dumpfile".  Then you use
-<tt>svnadmin</tt> to load each dumpfile, one after the other, into a
-project directory created within the Subversion repository.
-</p>
-
-<p><b>NOTE:</b> importing projects one at a time
-into a single Subversion repository will likely break date-based range
-commands (e.g. <tt>svn diff -r {2002-02-17:2002-03-18}</tt>) since
-Subversion does a binary search through the repository to look for
-dates.  While this is not the end of the world, it can be a minor
-inconvenience.
-</p>
-
-<p>Example:
+<p>To incrementally migrate modules contained within a CVS repository
+to Subversion you will need to use cvs2svn to create a "dumpfile".
+Then, using <tt>svnadmin</tt> you will load the dumpfile into a
+project directory created within the Subversion repository.  For
+example:
 </p>
 
 <ol>
   <li>If the svn repository doesn't already exist, create it:
     <pre>
-      svnadmin create /path/to/svnrepos
+      svnadmin create file:///path/to/svnrepos
     </pre></li>
 
   <li>Remember to <b>Make a backup</b> before starting.  Never run
@@ -161,7 +86,7 @@ inconvenience.
 
       # Use "svnadmin load" to load the dumpfile.
       $ cd ~/svndump
-      $ svnadmin --parent-dir projectA load /path/to/svnrepos &lt; cvs2svn-dump
+      $ svnadmin --parent-dir projectA load /path/to/svnrepo &lt; cvs2svn-dump
     </pre></li>
 
   <li>Repeat steps 3 and 4 for each module you want to convert.</li>
@@ -169,8 +94,8 @@ inconvenience.
 </ol>
 
 
-<h3><a name="inverted" title="#inverted">How can I convert project
-    <tt>foo</tt> so that <tt>trunk/tags/branches</tt> are inside of
+<h3><a name="inverted" title="#inverted">How can I convert project <tt>foo</tt> so
+    that <tt>trunk/tags/branches</tt> are inside of
     <tt>foo</tt>?</a></h3>
 
   <p>Given a CVS repository with the layout:</p>
@@ -306,27 +231,6 @@ repository--always work on a copy of your repository.</p>
 
 </ol>
 
-<p>If you run cvs2svn on a case-insensitive operating system, it is
-possible to get this error even if the filename of the file in
-Attic has different case than the one out of the Attic.  This could
-happen, for example, if the CVS repository was served from a
-case-sensitive operating system at some time.  A workaround for this
-problem is to copy the CVS repository to a case-sensitive operating
-system and convert it there.
-</p>
-
-
-<h3><a name="rcsmissing" title="#installrcs">Using cvs2svn 1.3.x, I
-    get an error "The command '['co', '-q', '-x,v', '-p1.1', '-kk',
-    '/home/cvsroot/myfile,v']' failed" in pass 8.</a></h3>
-
-<p>By default, cvs2svn uses the "co" program from RCS to read the
-contents of files in your archive.  (See the <a
-href="cvs2svn.html#reqs">requirements</a> section of the
-documentation.)  The solution to this problem is either to install
-RCS, or to ensure that CVS is installed and use cvs2svn's
-<a href="cvs2svn.html#use-cvs"><tt>--use-cvs</tt></a> option.
-</p>
 
 </div>
 </body>

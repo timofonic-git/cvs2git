@@ -16,7 +16,6 @@
 
 """This module contains database facilities used by cvs2svn."""
 
-import cPickle
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib import config
@@ -25,7 +24,7 @@ from cvs2svn_lib.artifact_manager import artifact_manager
 from cvs2svn_lib.database import Database
 from cvs2svn_lib.database import DB_OPEN_READ
 from cvs2svn_lib.openings_closings import OpeningsClosingsMap
-from cvs2svn_lib.symbol_filling_guide import SymbolFillingGuide
+from cvs2svn_lib.symbolic_name_filling_guide import SymbolicNameFillingGuide
 
 
 class SymbolingsReader:
@@ -44,49 +43,49 @@ class SymbolingsReader:
         'r')
     # The offsets_db is really small, and we need to read and write
     # from it a fair bit, so suck it into memory
-    offsets_db = file(
-        artifact_manager.get_temp_file(config.SYMBOL_OFFSETS_DB), 'rb')
-    # A map from symbol_id to offset.
-    self.offsets = cPickle.load(offsets_db)
-    offsets_db.close()
+    offsets_db = Database(
+        artifact_manager.get_temp_file(config.SYMBOL_OFFSETS_DB),
+        DB_OPEN_READ)
+    self.offsets = { }
+    for key in offsets_db:
+      #print " ZOO:", key, offsets_db[key]
+      self.offsets[key] = offsets_db[key]
 
-  def filling_guide_for_symbol(self, symbol, svn_revnum):
-    """Given SYMBOL and SVN_REVNUM, return a new SymbolFillingGuide object.
+  def filling_guide_for_symbol(self, symbolic_name, svn_revnum):
+    """Given SYMBOLIC_NAME and SVN_REVNUM, return a new
+    SymbolicNameFillingGuide object.
 
-    SYMBOL is a TypedSymbol instance.  Note that if we encounter an
-    opening rev in this fill, but the corresponding closing rev takes
-    place later than SVN_REVNUM, the closing will not be passed to
-    SymbolFillingGuide in this fill (and will be discarded when
-    encountered in a later fill).  This is perfectly fine, because we
-    can still do a valid fill without the closing--we always try to
-    fill what we can as soon as we can."""
+    Note that if we encounter an opening rev in this fill, but the
+    corresponding closing rev takes place later than SVN_REVNUM, the
+    closing will not be passed to SymbolicNameFillingGuide in this
+    fill (and will be discarded when encountered in a later fill).
+    This is perfectly fine, because we can still do a valid fill
+    without the closing--we always try to fill what we can as soon as
+    we can."""
 
-    openings_closings_map = OpeningsClosingsMap(symbol)
+    openings_closings_map = OpeningsClosingsMap(symbolic_name)
 
     # It's possible to have a branch start with a file that was added
     # on a branch
-    if symbol.id in self.offsets:
-      # Set our read offset for self.symbolings to the offset for this
-      # symbol:
-      self.symbolings.seek(self.offsets[symbol.id])
+    if self.offsets.has_key(symbolic_name):
+      # set our read offset for self.symbolings to the offset for
+      # symbolic_name
+      self.symbolings.seek(self.offsets[symbolic_name])
 
-      while True:
+      while 1:
         fpos = self.symbolings.tell()
         line = self.symbolings.readline().rstrip()
         if not line:
           break
-        id, revnum, type, branch_id, cvs_file_id = line.split()
-        id = int(id, 16)
-        cvs_file_id = int(cvs_file_id, 16)
-        cvs_file = Ctx()._cvs_file_db.get_file(cvs_file_id)
-        if branch_id == '*':
-          svn_path = cvs_file.project.make_trunk_path(cvs_file.cvs_path)
+        name, revnum, type, branch_name, cvs_file_id = line.split()
+        cvs_file = Ctx()._cvs_file_db.get_file(int(cvs_file_id, 16))
+        if branch_name == '*':
+          svn_path = Ctx().project.make_trunk_path(cvs_file.cvs_path)
         else:
-          branch_id = int(branch_id, 16)
-          svn_path = cvs_file.project.make_branch_path(
-              Ctx()._symbol_db.get_symbol(branch_id), cvs_file.cvs_path)
+          svn_path = Ctx().project.make_branch_path(
+              branch_name, cvs_file.cvs_path)
         revnum = int(revnum)
-        if revnum > svn_revnum or id != symbol.id:
+        if revnum > svn_revnum or name != symbolic_name:
           break
         openings_closings_map.register(svn_path, revnum, type)
 
@@ -94,8 +93,8 @@ class SymbolingsReader:
       # for the beginning of the line we just read if we used anything
       # we read.
       if not openings_closings_map.is_empty():
-        self.offsets[symbol.id] = fpos
+        self.offsets[symbolic_name] = fpos
 
-    return SymbolFillingGuide(openings_closings_map)
+    return SymbolicNameFillingGuide(openings_closings_map)
 
 

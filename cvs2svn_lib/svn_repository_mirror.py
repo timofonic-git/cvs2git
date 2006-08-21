@@ -19,8 +19,12 @@
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib import config
+from cvs2svn_lib.common import clean_symbolic_name
 from cvs2svn_lib.common import path_join
 from cvs2svn_lib.common import path_split
+from cvs2svn_lib.common import OP_ADD
+from cvs2svn_lib.common import OP_CHANGE
+from cvs2svn_lib.common import OP_DELETE
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.log import Log
 from cvs2svn_lib.key_generator import KeyGenerator
@@ -29,12 +33,13 @@ from cvs2svn_lib.database import Database
 from cvs2svn_lib.database import SDatabase
 from cvs2svn_lib.database import DB_OPEN_NEW
 from cvs2svn_lib.database import DB_OPEN_READ
-from cvs2svn_lib.symbol import BranchSymbol
-from cvs2svn_lib.symbol import TagSymbol
+from cvs2svn_lib.symbol_database import TagSymbol
+from cvs2svn_lib.symbol_database import SymbolDatabase
 from cvs2svn_lib.symbolings_reader import SymbolingsReader
 from cvs2svn_lib.fill_source import FillSource
 from cvs2svn_lib.svn_revision_range import SVNRevisionRange
 from cvs2svn_lib.svn_commit_item import SVNCommitItem
+from cvs2svn_lib.svn_commit import SVNCommit
 
 
 class SVNRepositoryMirror:
@@ -54,17 +59,10 @@ class SVNRepositoryMirror:
   revision that is being contructed is kept in memory in the new_nodes
   hash which is cheap to access.
 
-  You must invoke start_commit() between SVNCommits.
+  You must invoke _start_commit between SVNCommits.
 
   *** WARNING *** All path arguments to methods in this class CANNOT
       have leading or trailing slashes."""
-
-  class SVNRepositoryMirrorParentMissingError(Exception):
-    """Exception raised if an attempt is made to add a path to the
-    repository mirror but the parent's path doesn't exist in the youngest
-    revision of the repository."""
-
-    pass
 
   class SVNRepositoryMirrorPathExistsError(Exception):
     """Exception raised if an attempt is made to add a path to the
@@ -73,8 +71,14 @@ class SVNRepositoryMirror:
 
     pass
 
+  class SVNRepositoryMirrorUnexpectedOperationError(Exception):
+    """Exception raised if a CVSRevision is found to have an unexpected
+    operation (OP) value."""
+
+    pass
+
   class SVNRepositoryMirrorInvalidFillOperationError(Exception):
-    """Exception raised if an empty SymbolFillingGuide is returned
+    """Exception raised if an empty SymbolicNameFillingGuide is returned
     during a fill where the branch in question already exists."""
 
     pass
@@ -105,18 +109,39 @@ class SVNRepositoryMirror:
     self.new_nodes = { }
 
     if not Ctx().trunk_only:
+      self.symbol_db = SymbolDatabase(DB_OPEN_READ)
       self.symbolings_reader = SymbolingsReader()
 
-  def start_commit(self, revnum, revprops):
+  def _initialize_repository(self, date):
+    """Initialize the repository by creating the directories for
+    trunk, tags, and branches.  This method should only be called
+    after all delegates are added to the repository mirror."""
+
+    # Make a 'fake' SVNCommit so we can take advantage of the revprops
+    # magic therein
+    svn_commit = SVNCommit("Initialization", 1)
+    svn_commit.set_date(date)
+    svn_commit.set_log_msg("New repository initialized by cvs2svn.")
+
+    self._start_commit(svn_commit)
+    self._mkdir(Ctx().project.trunk_path)
+    if not Ctx().trunk_only:
+      self._mkdir(Ctx().project.branches_path)
+      self._mkdir(Ctx().project.tags_path)
+
+  def _start_commit(self, svn_commit):
     """Start a new commit."""
 
-    self.youngest = revnum
+    if self.youngest > 0:
+      self._end_commit()
+
+    self.youngest = svn_commit.revnum
     self.new_root_key = None
     self.new_nodes = { }
 
-    self._invoke_delegates('start_commit', revnum, revprops)
+    self._invoke_delegates('start_commit', svn_commit)
 
-  def end_commit(self):
+  def _end_commit(self):
     """Called at the end of each commit.  This method copies the newly
     created nodes to the on-disk nodes db."""
 
@@ -130,13 +155,11 @@ class SVNRepositoryMirror:
       for key, value in self.new_nodes.items():
         self.nodes_db[key] = value
 
-    self._invoke_delegates('end_commit')
-
   def _get_node(self, key):
     """Returns the node contents for KEY which may refer to either
     self.nodes_db or self.new_nodes."""
 
-    if key in self.new_nodes:
+    if self.new_nodes.has_key(key):
       return self.new_nodes[key]
     else:
       return self.nodes_db[key]
@@ -219,8 +242,9 @@ class SVNRepositoryMirror:
 
     return this_key, this_contents
 
-  def path_exists(self, path):
-    """Return True iff PATH exists in self.youngest of the repository mirror.
+  def _path_exists(self, path):
+    """If PATH exists in self.youngest of the svn repository mirror,
+    return true, else return None.
 
     PATH must not start with '/'."""
 
@@ -231,25 +255,22 @@ class SVNRepositoryMirror:
     contents PARENT_CONTENTS.  Do nothing if COMPONENT does not exist
     in PARENT_CONTENTS."""
 
-    if component in parent_contents:
+    if parent_contents.has_key(component):
       del parent_contents[component]
       self._invoke_delegates('delete_path',
                              path_join(parent_path, component))
 
-  def delete_path(self, svn_path, should_prune=False):
+  def _delete_path(self, svn_path, should_prune=False):
     """Delete PATH from the tree.  If SHOULD_PRUNE is true, then delete
     all ancestor directories that are made empty when SVN_PATH is deleted.
     In other words, SHOULD_PRUNE is like the -P option to 'cvs checkout'.
 
     NOTE: This function ignores requests to delete the root directory
-    or any directory for which any project's is_unremovable() method
-    returns True, either directly or by pruning."""
+    or any directory for which Ctx().project.is_unremovable() returns
+    True, either directly or by pruning."""
 
-    if svn_path == '':
+    if svn_path == '' or Ctx().project.is_unremovable(svn_path):
       return
-    for project in Ctx().projects:
-      if project.is_unremovable(svn_path):
-        return
 
     (parent_path, entry,) = path_split(svn_path)
     if parent_path:
@@ -266,15 +287,15 @@ class SVNRepositoryMirror:
       # drawback is that we issue a delete for each path and not just
       # a single delete for the topmost directory pruned.
       if should_prune and len(parent_contents) == 0:
-        self.delete_path(parent_path, True)
+        self._delete_path(parent_path, True)
 
-  def mkdir(self, path):
+  def _mkdir(self, path):
     """Create PATH in the repository mirror at the youngest revision."""
 
     self._open_writable_node(path, True)
     self._invoke_delegates('mkdir', path)
 
-  def change_path(self, cvs_rev):
+  def _change_path(self, cvs_rev):
     """Register a change in self.youngest for the CVS_REV's svn_path
     in the repository mirror."""
 
@@ -283,13 +304,13 @@ class SVNRepositoryMirror:
     # content change does not cause any path changes.
     self._invoke_delegates('change_path', SVNCommitItem(cvs_rev, False))
 
-  def add_path(self, cvs_rev):
+  def _add_path(self, cvs_rev):
     """Add the CVS_REV's svn_path to the repository mirror."""
 
     self._open_writable_node(cvs_rev.svn_path, True)
     self._invoke_delegates('add_path', SVNCommitItem(cvs_rev, True))
 
-  def copy_path(self, src_path, dest_path, src_revnum):
+  def _copy_path(self, src_path, dest_path, src_revnum):
     """Copy SRC_PATH at subversion revision number SRC_REVNUM to
     DEST_PATH. In the youngest revision of the repository, DEST_PATH's
     parent *must* exist, but DEST_PATH *cannot* exist.
@@ -306,14 +327,10 @@ class SVNRepositoryMirror:
     dest_parent_key, dest_parent_contents = \
                    self._open_writable_node(dest_parent, False)
 
-    if dest_parent_key is None:
-      raise self.SVNRepositoryMirrorParentMissingError(
-        "Attempt to add path '%s' to repository mirror, "
-        "but its parent directory doesn't exist in the mirror." % dest_path)
-    elif dest_basename in dest_parent_contents:
-      raise self.SVNRepositoryMirrorPathExistsError(
-        "Attempt to add path '%s' to repository mirror "
-        "when it already exists in the mirror." % dest_path)
+    if dest_parent_contents.has_key(dest_basename):
+      msg = "Attempt to add path '%s' to repository mirror " % dest_path
+      msg += "when it already exists in the mirror."
+      raise self.SVNRepositoryMirrorPathExistsError, msg
 
     dest_parent_contents[dest_basename] = src_key
     self._invoke_delegates('copy_path', src_path, dest_path, src_revnum)
@@ -322,34 +339,34 @@ class SVNRepositoryMirror:
     # destination.  This is a cheap copy, remember!  :-)
     return src_key, src_contents
 
-  def fill_symbol(self, symbol):
+  def _fill_symbolic_name(self, svn_commit):
     """Performs all copies necessary to create as much of the the tag
-    or branch SYMBOL as possible given the current revision of the
-    repository mirror.  SYMBOL is an instance of TypedSymbol.
+    or branch SVN_COMMIT.symbolic_name as possible given the current
+    revision of the repository mirror.
 
     The symbolic name is guaranteed to exist in the Subversion
     repository by the end of this call, even if there are no paths
     under it."""
 
     symbol_fill = self.symbolings_reader.filling_guide_for_symbol(
-        symbol, self.youngest)
+        svn_commit.symbolic_name, self.youngest)
     # Get the list of sources for the symbolic name.
     sources = symbol_fill.get_sources()
 
     if sources:
+      symbol = self.symbol_db.get_symbol(svn_commit.symbolic_name)
       if isinstance(symbol, TagSymbol):
-        dest_prefix = symbol.project.get_tag_path(symbol)
+        dest_prefix = Ctx().project.get_tag_path(svn_commit.symbolic_name)
       else:
-        assert isinstance(symbol, BranchSymbol)
-        dest_prefix = symbol.project.get_branch_path(symbol)
+        dest_prefix = Ctx().project.get_branch_path(svn_commit.symbolic_name)
 
       dest_key = self._open_writable_node(dest_prefix, False)[0]
       self._fill(symbol_fill, dest_prefix, dest_key, sources)
     else:
       # We can only get here for a branch whose first commit is an add
       # (as opposed to a copy).
-      dest_path = symbol.project.get_branch_path(symbol)
-      if not self.path_exists(dest_path):
+      dest_path = Ctx().project.get_branch_path(symbol_fill.name)
+      if not self._path_exists(dest_path):
         # If our symbol_fill was empty, that means that our first
         # commit on the branch was to a file added on the branch, and
         # that this is our first fill of that branch.
@@ -358,22 +375,22 @@ class SVNRepositoryMirror:
         #
         # ...we create the branch by copying trunk from the our
         # current revision number minus 1
-        source_path = symbol.project.trunk_path
-        entries = self.copy_path(source_path, dest_path, self.youngest - 1)[1]
+        source_path = Ctx().project.trunk_path
+        entries = self._copy_path(source_path, dest_path,
+                                  svn_commit.revnum - 1)[1]
         # Now since we've just copied trunk to a branch that's
         # *supposed* to be empty, we delete any entries in the
         # copied directory.
         for entry in entries:
           del_path = dest_path + '/' + entry
           # Delete but don't prune.
-          self.delete_path(del_path)
+          self._delete_path(del_path)
       else:
-        raise self.SVNRepositoryMirrorInvalidFillOperationError(
-          "Error filling branch '%s'.\n"
-          "Received an empty SymbolFillingGuide and\n"
-          "attempted to create a branch that already exists."
-          % symbol.get_clean_name()
-          )
+        msg = "Error filling branch '" \
+              + clean_symbolic_name(symbol_fill.name) + "'.\n"
+        msg += "Received an empty SymbolicNameFillingGuide and\n"
+        msg += "attempted to create a branch that already exists."
+        raise self.SVNRepositoryMirrorInvalidFillOperationError, msg
 
   def _fill(self, symbol_fill, dest_prefix, dest_key, sources,
             path = None, parent_source_prefix = None,
@@ -428,12 +445,12 @@ class SVNRepositoryMirror:
                        copy_source.revnum != preferred_revnum):
       # We are about to replace the destination, so we need to remove
       # it before we perform the copy.
-      self.delete_path(dest_path)
+      self._delete_path(dest_path)
       do_copy = 1
 
     if do_copy:
-      dest_key, dest_entries = self.copy_path(src_path, dest_path,
-                                              copy_source.revnum)
+      dest_key, dest_entries = self._copy_path(src_path, dest_path,
+                                               copy_source.revnum)
       prune_ok = 1
     else:
       dest_entries = self._get_node(dest_key)
@@ -453,10 +470,10 @@ class SVNRepositoryMirror:
       # Delete the entries in DEST_ENTRIES that are not in src_entries.
       delete_list = [ ]
       for entry in dest_entries:
-        if entry not in src_entries:
+        if not src_entries.has_key(entry):
           delete_list.append(entry)
       if delete_list:
-        if dest_key not in self.new_nodes:
+        if not self.new_nodes.has_key(dest_key):
           dest_key, dest_entries = self._open_writable_node(dest_path, True)
         # Sort the delete list to get "diffable" dumpfiles.
         delete_list.sort()
@@ -471,6 +488,92 @@ class SVNRepositoryMirror:
       self._fill(symbol_fill, dest_prefix, next_dest_key,
                  src_entries[src_key], path_join(path, src_key),
                  copy_source.prefix, sources[0].revnum, prune_ok)
+
+  def _synchronize_default_branch(self, svn_commit):
+    """Propagate any changes that happened on a non-trunk default
+    branch to the trunk of the repository.  See
+    CVSCommit._post_commit() for details on why this is necessary."""
+
+    for cvs_rev in svn_commit.cvs_revs:
+      svn_trunk_path = Ctx().project.make_trunk_path(cvs_rev.cvs_path)
+      if cvs_rev.op == OP_ADD or cvs_rev.op == OP_CHANGE:
+        if self._path_exists(svn_trunk_path):
+          # Delete the path on trunk...
+          self._delete_path(svn_trunk_path)
+        # ...and copy over from branch
+        self._copy_path(cvs_rev.svn_path, svn_trunk_path,
+                        svn_commit.motivating_revnum)
+      elif cvs_rev.op == OP_DELETE:
+        # delete trunk path
+        self._delete_path(svn_trunk_path)
+      else:
+        msg = ("Unknown CVSRevision operation '%s' in default branch sync."
+               % cvs_rev.op)
+        raise self.SVNRepositoryMirrorUnexpectedOperationError, msg
+
+  def commit(self, svn_commit):
+    """Add an SVNCommit to the SVNRepository, incrementing the
+    Repository revision number, and changing the repository.  Invoke
+    the delegates' _start_commit() method."""
+
+    if svn_commit.revnum == 2:
+      self._initialize_repository(svn_commit.get_date())
+
+    self._start_commit(svn_commit)
+
+    if svn_commit.symbolic_name:
+      Log().verbose("Filling symbolic name:",
+                    clean_symbolic_name(svn_commit.symbolic_name))
+      self._fill_symbolic_name(svn_commit)
+    elif svn_commit.motivating_revnum:
+      Log().verbose("Synchronizing default_branch motivated by %d"
+                    % svn_commit.motivating_revnum)
+      self._synchronize_default_branch(svn_commit)
+    else: # This actually commits CVSRevisions
+      if len(svn_commit.cvs_revs) > 1: plural = "s"
+      else: plural = ""
+      Log().verbose("Committing %d CVSRevision%s"
+                    % (len(svn_commit.cvs_revs), plural))
+      for cvs_rev in svn_commit.cvs_revs:
+        # See comment in CVSCommit._commit() for what this is all
+        # about.  Note that although asking self._path_exists() is
+        # somewhat expensive, we only do it if the first two (cheap)
+        # tests succeed first.
+        if (cvs_rev.rev == "1.1.1.1"
+            and not cvs_rev.deltatext_exists
+            and self._path_exists(cvs_rev.svn_path)):
+          # This change can be omitted.
+          pass
+        else:
+          if cvs_rev.op == OP_ADD:
+            self._add_path(cvs_rev)
+          elif cvs_rev.op == OP_CHANGE:
+            # Fix for Issue #74:
+            #
+            # Here's the scenario.  You have file FOO that is imported
+            # on a non-trunk vendor branch.  So in r1.1 and r1.1.1.1,
+            # the file exists.
+            #
+            # Moving forward in time, FOO is deleted on the default
+            # branch (r1.1.1.2).  cvs2svn determines that this delete
+            # also needs to happen on trunk, so FOO is deleted on
+            # trunk.
+            #
+            # Along come r1.2, whose op is OP_CHANGE (because r1.1 is
+            # not 'dead', we assume it's a change).  However, since
+            # our trunk file has been deleted, svnadmin blows up--you
+            # can't change a file that doesn't exist!
+            #
+            # Soooo... we just check the path, and if it doesn't
+            # exist, we do an add... if the path does exist, it's
+            # business as usual.
+            if not self._path_exists(cvs_rev.svn_path):
+              self._add_path(cvs_rev)
+            else:
+              self._change_path(cvs_rev)
+
+        if cvs_rev.op == OP_DELETE:
+          self._delete_path(cvs_rev.svn_path, Ctx().prune)
 
   def add_delegate(self, delegate):
     """Adds DELEGATE to self.delegates.
@@ -494,6 +597,7 @@ class SVNRepositoryMirror:
   def finish(self):
     """Calls the delegate finish method."""
 
+    self._end_commit()
     self._invoke_delegates('finish')
     self.revs_db = None
     self.nodes_db = None
@@ -512,15 +616,9 @@ class SVNRepositoryMirrorDelegate:
   to the Subversion repository that it is creating.
   """
 
-  def start_commit(self, revnum, revprops):
-    """Perform any actions needed to start an SVN commit with revision
-    number REVNUM and revision properties REVPROPS; see subclass
-    implementation for details."""
-
-    raise NotImplementedError
-
-  def end_commit(self):
-    """This method is called at the end of each SVN commit."""
+  def start_commit(self, svn_commit):
+    """Perform any actions needed to start SVNCommit SVN_COMMIT;
+    see subclass implementation for details."""
 
     raise NotImplementedError
 

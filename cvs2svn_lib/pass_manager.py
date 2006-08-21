@@ -25,7 +25,6 @@ from cvs2svn_lib.common import FatalError
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.log import Log
 from cvs2svn_lib.stats_keeper import StatsKeeper
-from cvs2svn_lib.stats_keeper import read_stats_keeper
 from cvs2svn_lib.artifact_manager import artifact_manager
 
 
@@ -94,21 +93,15 @@ class PassManager:
     index_end = end_pass
 
     artifact_manager.register_temp_file(config.STATISTICS_FILE, self)
+    stats_keeper = StatsKeeper()
+    stats_keeper.set_start_time(time.time())
 
     # Inform the artifact manager when artifacts are created and used:
     for the_pass in self.passes:
+      # The statistics object is needed for every pass:
+      artifact_manager.register_temp_file_needed(
+          config.STATISTICS_FILE, the_pass)
       the_pass.register_artifacts()
-
-    # Consider self to be running during the whole conversion, to keep
-    # STATISTICS_FILE alive:
-    artifact_manager.pass_started(self)
-
-    if index_start == 0:
-      stats_keeper = StatsKeeper()
-    else:
-      stats_keeper = read_stats_keeper()
-
-    stats_keeper.set_start_time(time.time())
 
     # Tell the artifact manager about passes that are being skipped this run:
     for the_pass in self.passes[0:index_start]:
@@ -118,12 +111,16 @@ class PassManager:
     for i in range(index_start, index_end):
       the_pass = self.passes[i]
       Log().quiet('----- pass %d (%s) -----' % (i + 1, the_pass.name,))
-      artifact_manager.pass_started(the_pass)
       the_pass.run(stats_keeper)
       end_time = time.time()
       stats_keeper.log_duration_for_pass(end_time - start_time, i + 1)
       start_time = end_time
-      Ctx().clean()
+      # Dispose of items in Ctx() not intended to live past the end of the
+      # pass (identified by exactly one leading underscore)
+      for attr in dir(Ctx()):
+        if (attr.startswith('_') and not attr.startswith('__')
+            and not attr.startswith('_Ctx__')):
+          delattr(Ctx(), attr)
       # Allow the artifact manager to clean up artifacts that are no
       # longer needed:
       artifact_manager.pass_done(the_pass)
@@ -142,7 +139,7 @@ class PassManager:
       artifact_manager.pass_done(self)
     else:
       # The end is yet to come:
-      artifact_manager.pass_continued(self)
+      artifact_manager.pass_deferred(self)
 
     # Consistency check:
     artifact_manager.check_clean()

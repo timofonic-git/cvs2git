@@ -27,9 +27,9 @@ from cvs2svn_lib.svn_revision_range import SVNRevisionRange
 from cvs2svn_lib.fill_source import FillSource
 
 
-class SymbolFillingGuide:
+class SymbolicNameFillingGuide:
   """A node tree representing the source paths to be copied to fill
-  self.name in the current SVNCommit.
+  self.symbolic_name in the current SVNCommit.
 
   self._node_tree is the root of the directory tree, in the form {
   path_component : subnode }.  Leaf nodes are instances of
@@ -46,11 +46,11 @@ class SymbolFillingGuide:
   actions to "patch up" the subtrees."""
 
   def __init__(self, openings_closings_map):
-    """Initializes a SymbolFillingGuide for OPENINGS_CLOSINGS_MAP and
+    """Initializes a SymbolicNameFillingGuide for SYMBOLIC_NAME and
     store into it the openings and closings from
     OPENINGS_CLOSINGS_MAP."""
 
-    self.symbol = openings_closings_map.symbol
+    self.name = openings_closings_map.name
 
     # The dictionary that holds our node tree as a map { node_key :
     # node }.
@@ -68,7 +68,7 @@ class SymbolFillingGuide:
     # Walk down the path, one node at a time.
     node = self._node_tree
     for component in svn_path.split('/'):
-      if component in node:
+      if node.has_key(component):
         node = node[component]
       else:
         old_node = node
@@ -172,7 +172,7 @@ class SymbolFillingGuide:
     if revnum == SVN_INVALID_REVNUM:
       raise FatalError(
           "failed to find a revision to copy from when copying %s"
-          % self.symbol.name)
+          % self.name)
     return revnum, max_score
 
   def _list_revnums(self, node):
@@ -203,11 +203,12 @@ class SymbolFillingGuide:
     search at path START_SVN_PATH, which is node START_NODE.  This is
     a helper method, called by get_sources() (see)."""
 
+    project = Ctx().project
     if isinstance(start_node, SVNRevisionRange):
       # This implies that a change was found outside of the
       # legitimate sources.  This should never happen.
       raise
-    elif self.symbol.project.is_source(start_svn_path):
+    elif project.is_source(start_svn_path):
       # This is a legitimate source.  Add it to list.
       return [ FillSource(start_svn_path, start_node) ]
     else:

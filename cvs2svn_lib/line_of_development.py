@@ -29,34 +29,24 @@ class LineOfDevelopment:
 
 
 class Trunk(LineOfDevelopment):
-  """Represent the main line of development."""
+  """Represent the main line of development.
+
+  Instances of this class are considered False."""
 
   def __init__(self):
     pass
 
   def make_path(self, cvs_file):
-    return cvs_file.project.make_trunk_path(cvs_file.cvs_path)
-
-  def __str__(self):
-    """For convenience only.  The format is subject to change at any time."""
-
-    return 'Trunk'
+    return Ctx().project.make_trunk_path(cvs_file.cvs_path)
 
 
 class Branch(LineOfDevelopment):
   """An object that describes a CVS branch."""
 
-  def __init__(self, symbol):
-    self.symbol = symbol
-    self.id = symbol.id
-    self.name = symbol.name
+  def __init__(self, name):
+    self.name = name
 
   def make_path(self, cvs_file):
-    return cvs_file.project.make_branch_path(self.symbol, cvs_file.cvs_path)
-
-  def __str__(self):
-    """For convenience only.  The format is subject to change at any time."""
-
-    return 'Branch %r <%x>' % (self.name, self.id,)
+    return Ctx().project.make_branch_path(self.name, cvs_file.cvs_path)
 
 

@@ -20,7 +20,6 @@
 import os
 
 from cvs2svn_lib.boolean import *
-from cvs2svn_lib.common import CommandError
 from cvs2svn_lib.common import FatalError
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.log import Log
@@ -71,6 +70,9 @@ class RepositoryDelegate(DumpfileDelegate):
     # artifact_manager.
     DumpfileDelegate.__init__(self, Ctx().get_temp_filename(Ctx().dumpfile))
 
+    # This is 1 if a commit is in progress, otherwise None.
+    self._commit_in_progress = None
+
     self.dumpfile = open(self.dumpfile_path, 'w+b')
     self.loader_pipe = SimplePopen([ self.svnadmin, 'load', '-q',
                                      self.target ], True)
@@ -82,20 +84,14 @@ class RepositoryDelegate(DumpfileDelegate):
                        "loading the dumpfile:\n"
                        + self.loader_pipe.stderr.read())
 
-  def start_commit(self, revnum, revprops):
-    """Start a new commit."""
-
-    DumpfileDelegate.start_commit(self, revnum, revprops)
-
-  def end_commit(self):
-    """Feed the revision stored in the dumpfile to the svnadmin load pipe."""
-
-    DumpfileDelegate.end_commit(self)
+  def _feed_pipe(self):
+    """Feed the revision stored in the dumpfile to the svnadmin
+    load pipe."""
 
     self.dumpfile.seek(0)
-    while True:
+    while 1:
       data = self.dumpfile.read(128*1024) # Chunk size is arbitrary
-      if not data:
+      if not len(data):
         break
       try:
         self.loader_pipe.stdin.write(data)
@@ -103,18 +99,31 @@ class RepositoryDelegate(DumpfileDelegate):
         raise FatalError("svnadmin failed with the following output "
                          "while loading the dumpfile:\n"
                          + self.loader_pipe.stderr.read())
+
+  def start_commit(self, svn_commit):
+    """Start a new commit.  If a commit is already in progress, close
+    the dumpfile, load it into the svn repository, open a new
+    dumpfile, and write the header into it."""
+
+    if self._commit_in_progress:
+      self._feed_pipe()
     self.dumpfile.seek(0)
     self.dumpfile.truncate()
+    DumpfileDelegate.start_commit(self, svn_commit)
+    self._commit_in_progress = 1
 
   def finish(self):
-    """Clean up."""
+    """Loads the last commit into the repository."""
 
+    self._feed_pipe()
     self.dumpfile.close()
     self.loader_pipe.stdin.close()
     error_output = self.loader_pipe.stderr.read()
     exit_status = self.loader_pipe.wait()
     if exit_status:
-      raise CommandError('svnadmin load', exit_status, error_output)
+      raise FatalError('svnadmin load failed with exit status: %s\n'
+                       'and the following output:\n'
+                       '%s' % (exit_status, error_output,))
     os.remove(self.dumpfile_path)
 
     # If this is a BDB repository, and we created the repository, and

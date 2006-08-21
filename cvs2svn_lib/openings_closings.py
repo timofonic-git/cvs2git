@@ -17,6 +17,8 @@
 """This module contains database facilities used by cvs2svn."""
 
 
+import fileinput
+
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib import config
 from cvs2svn_lib.common import OP_DELETE
@@ -24,6 +26,7 @@ from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.artifact_manager import artifact_manager
 from cvs2svn_lib.database import DB_OPEN_READ
 from cvs2svn_lib.line_of_development import Branch
+from cvs2svn_lib.cvs_item_database import CVSItemDatabase
 from cvs2svn_lib.svn_revision_range import SVNRevisionRange
 
 
@@ -33,7 +36,8 @@ CLOSING = 'C'
 
 
 class SymbolingsLogger:
-  """Manage the file that contains lines for symbol openings and closings.
+  """Manage the file that contains lines for symbol openings and
+  closings.
 
   This data will later be used to determine valid SVNRevision ranges
   from which a file can be copied when creating a branch or tag in
@@ -70,88 +74,109 @@ class SymbolingsLogger:
   def __init__(self):
     self.symbolings = open(
         artifact_manager.get_temp_file(config.SYMBOL_OPENINGS_CLOSINGS), 'w')
+    self.closings = open(
+        artifact_manager.get_temp_file(config.SYMBOL_CLOSINGS_TMP), 'w')
 
     # This keys of this dictionary are *source* cvs_paths for which
     # we've encountered an 'opening' on the default branch.  The
-    # values are the ids of symbols that this path has opened.
-    self._open_paths_with_default_branches = { }
+    # values are the (uncleaned) symbolic names that this path has
+    # opened.
+    self.open_paths_with_default_branches = { }
 
   def log_revision(self, c_rev, svn_revnum):
-    """Log any openings and closings found in C_REV."""
+    """Log any openings found in C_REV, and if C_REV.next_id is not
+    None, a closing.  The opening uses SVN_REVNUM, but the closing (if
+    any) will have its revnum determined later."""
 
-    if isinstance(c_rev.lod, Branch):
-      branch_id = c_rev.lod.id
-    else:
-      branch_id = None
-
-    for symbol_id in c_rev.tag_ids + c_rev.branch_ids:
-      self._note_default_branch_opening(c_rev, symbol_id)
+    for name in c_rev.tags + c_rev.branches:
+      self._note_default_branch_opening(c_rev, name)
       if c_rev.op != OP_DELETE:
-        self._log(symbol_id, svn_revnum, c_rev.cvs_file, branch_id, OPENING)
+        self._log(
+            name, svn_revnum,
+            c_rev.cvs_file,
+            isinstance(c_rev.lod, Branch) and c_rev.lod.name,
+            OPENING)
 
-    for symbol_id in c_rev.closed_symbol_ids:
-      self._log(symbol_id, svn_revnum, c_rev.cvs_file, branch_id, CLOSING)
+      # If our c_rev has a next_rev, then that's the closing rev for
+      # this source revision.  Log it to closings for later processing
+      # since we don't know the svn_revnum yet.
+      if c_rev.next_id is not None:
+        self.closings.write('%s %x\n' % (name, c_rev.next_id))
 
-  def _log(self, symbol_id, svn_revnum, cvs_file, branch_id, type):
-    """Log an opening or closing to self.symbolings.
-
-    Write out a single line to the symbol_openings_closings file
-    representing that SVN_REVNUM of SVN_FILE on BRANCH_ID is either
+  def _log(self, name, svn_revnum, cvs_file, branch_name, type):
+    """Write out a single line to the symbol_openings_closings file
+    representing that SVN_REVNUM of SVN_FILE on BRANCH_NAME is either
     the opening or closing (TYPE) of NAME (a symbolic name).
 
-    TYPE should be one of the following constants: OPENING or CLOSING.
+    TYPE should only be one of the following constants: OPENING or
+    CLOSING."""
 
-    BRANCH_ID is the symbol id of the branch on which the opening or
-    closing occurred, or None if the opening/closing occurred on the
-    default branch."""
-
-    if branch_id is None:
-      branch_id = '*'
-    else:
-      branch_id = '%x' % branch_id
     # 8 places gives us 999,999,999 SVN revs.  That *should* be enough.
     self.symbolings.write(
-        '%x %.8d %s %s %x\n'
-        % (symbol_id, svn_revnum, type, branch_id, cvs_file.id))
+        '%s %.8d %s %s %x\n'
+        % (name, svn_revnum, type, branch_name or '*', cvs_file.id))
 
   def close(self):
+    """Iterate through the closings file, lookup the svn_revnum for
+    each closing CVSRevision, and write a proper line out to the
+    symbolings file."""
+
+    # Use this to get the c_rev of our rev_key
+    cvs_items_db = CVSItemDatabase(
+        artifact_manager.get_temp_file(config.CVS_ITEMS_RESYNC_DB),
+        DB_OPEN_READ)
+
+    self.closings.close()
+    for line in fileinput.FileInput(
+            artifact_manager.get_temp_file(config.SYMBOL_CLOSINGS_TMP)):
+      (name, rev_key) = line.rstrip().split(" ", 1)
+      rev_id = int(rev_key, 16)
+      svn_revnum = Ctx()._persistence_manager.get_svn_revnum(rev_id)
+
+      c_rev = cvs_items_db[rev_id]
+      self._log(
+          name, svn_revnum,
+          c_rev.cvs_file,
+          isinstance(c_rev.lod, Branch) and c_rev.lod.name,
+          CLOSING)
+
     self.symbolings.close()
 
-  def _note_default_branch_opening(self, c_rev, symbol_id):
+  def _note_default_branch_opening(self, c_rev, symbolic_name):
     """If C_REV is a default branch revision, log C_REV.cvs_path as an
     opening for SYMBOLIC_NAME."""
 
-    self._open_paths_with_default_branches.setdefault(
-        c_rev.cvs_path, []).append(symbol_id)
+    self.open_paths_with_default_branches.setdefault(
+        c_rev.cvs_path, []).append(symbolic_name)
 
   def log_default_branch_closing(self, c_rev, svn_revnum):
-    """If self._open_paths_with_default_branches contains
-    C_REV.cvs_path, then call log each symbol in
-    self._open_paths_with_default_branches[C_REV.cvs_path] as a closing
+    """If self.open_paths_with_default_branches contains
+    C_REV.cvs_path, then call log each name in
+    self.open_paths_with_default_branches[C_REV.cvs_path] as a closing
     with SVN_REVNUM as the closing revision number."""
 
     path = c_rev.cvs_path
-    if path in self._open_paths_with_default_branches:
+    if self.open_paths_with_default_branches.has_key(path):
       # log each symbol as a closing
-      for symbol_id in self._open_paths_with_default_branches[path]:
-        self._log(symbol_id, svn_revnum, c_rev.cvs_file, None, CLOSING)
+      for name in self.open_paths_with_default_branches[path]:
+        self._log(name, svn_revnum, c_rev.cvs_file, None, CLOSING)
       # Remove them from the openings list as we're done with them.
-      del self._open_paths_with_default_branches[path]
+      del self.open_paths_with_default_branches[path]
 
 
 class OpeningsClosingsMap:
-  """A dictionary of openings and closings for a symbol in the current
-  SVNCommit.
+  """A dictionary of openings and closings for a symbolic name in the
+  current SVNCommit.
 
   The user should call self.register() for the openings and closings,
   then self.get_node_tree() to retrieve the information as a
-  SymbolFillingGuide."""
+  SymbolicNameFillingGuide."""
 
-  def __init__(self, symbol):
+  def __init__(self, symbolic_name):
     """Initialize OpeningsClosingsMap and prepare it for receiving
     openings and closings."""
 
-    self.symbol = symbol
+    self.name = symbolic_name
 
     # A dictionary of SVN_PATHS to SVNRevisionRange objects.
     self.things = { }
@@ -159,9 +184,9 @@ class OpeningsClosingsMap:
   def register(self, svn_path, svn_revnum, type):
     """Register an opening or closing revision for this symbolic name.
     SVN_PATH is the source path that needs to be copied into
-    self.symbol, and SVN_REVNUM is either the first svn revision
-    number that we can copy from (our opening), or the last (not
-    inclusive) svn revision number that we can copy from (our
+    self.symbolic_name, and SVN_REVNUM is either the first svn
+    revision number that we can copy from (our opening), or the last
+    (not inclusive) svn revision number that we can copy from (our
     closing).  TYPE indicates whether this path is an opening or a a
     closing.
 
@@ -177,7 +202,7 @@ class OpeningsClosingsMap:
       self.things[svn_path] = SVNRevisionRange(svn_revnum)
     # Only log a closing if we've already registered the opening for that
     # path.
-    elif type == CLOSING and svn_path in self.things:
+    elif type == CLOSING and self.things.has_key(svn_path):
       self.things[svn_path].add_closing(svn_revnum)
 
   def is_empty(self):

@@ -32,15 +32,13 @@ class StdoutDelegate(SVNRepositoryMirrorDelegate):
   def __init__(self, total_revs):
     self.total_revs = total_revs
 
-  def start_commit(self, revnum, revprops):
+  def start_commit(self, svn_commit):
     """Prints out the Subversion revision number of the commit that is
     being started."""
 
     Log().verbose("=" * 60)
-    Log().normal("Starting Subversion r%d / %d" % (revnum, self.total_revs))
-
-  def end_commit(self):
-    pass
+    Log().normal("Starting Subversion r%d / %d"
+                 % (svn_commit.revnum, self.total_revs))
 
   def mkdir(self, path):
     """Print a line stating that we are creating directory PATH."""
