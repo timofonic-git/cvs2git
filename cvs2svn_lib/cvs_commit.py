@@ -252,18 +252,19 @@ class CVSCommit:
       that file in state 'dead'.  We only want to add this revision if
       the log message is not the standard cvs fabricated log message."""
 
-      if c_rev.prev_id is not None:
-        return True
+      if c_rev.prev_id is None:
+        # c_rev.branch_ids may be empty if the originating branch
+        # has been excluded.
+        if not c_rev.branch_ids:
+          return False
+        cvs_generated_msg = 'file %s was initially added on branch %s.\n' % (
+            c_rev.cvs_file.basename,
+            Ctx()._symbol_db.get_name(c_rev.branch_ids[0]),)
+        author, log_msg = Ctx()._metadata_db[c_rev.metadata_id]
+        if log_msg == cvs_generated_msg:
+          return False
 
-      # c_rev.branch_ids may be empty if the originating branch
-      # has been excluded.
-      if not c_rev.branch_ids:
-        return False
-      cvs_generated_msg = 'file %s was initially added on branch %s.\n' % (
-          c_rev.cvs_file.basename,
-          Ctx()._symbol_db.get_symbol(c_rev.branch_ids[0]).name,)
-      author, log_msg = Ctx()._metadata_db[c_rev.metadata_id]
-      return log_msg != cvs_generated_msg
+      return True
 
     # Generate an SVNCommit unconditionally.  Even if the only change
     # in this CVSCommit is a deletion of an already-deleted file (that
@@ -293,11 +294,11 @@ class CVSCommit:
         # conditions above are strict enough.)
         pass
       else:
-        if c_rev.default_branch_revision:
+        if c_rev.is_default_branch_revision():
           self.default_branch_cvs_revisions.append(c_rev)
 
     for c_rev in needed_deletes:
-      if c_rev.default_branch_revision:
+      if c_rev.is_default_branch_revision():
         self.default_branch_cvs_revisions.append(c_rev)
 
     # There is a slight chance that we didn't actually register any

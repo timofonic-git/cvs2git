@@ -23,11 +23,10 @@ from cvs2svn_lib.common import warning_prefix
 from cvs2svn_lib.common import OP_ADD
 from cvs2svn_lib.common import OP_CHANGE
 from cvs2svn_lib.common import OP_DELETE
-from cvs2svn_lib.common import to_utf8
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.log import Log
-from cvs2svn_lib.symbol import BranchSymbol
-from cvs2svn_lib.symbol import TagSymbol
+from cvs2svn_lib.symbol_database import BranchSymbol
+from cvs2svn_lib.symbol_database import TagSymbol
 
 
 class SVNCommit:
@@ -95,8 +94,8 @@ class SVNCommit:
     try:
       utf8_author = None
       if self._author is not None:
-        utf8_author = to_utf8(self._author)
-      utf8_log = to_utf8(log_msg)
+        utf8_author = Ctx().to_utf8(self._author)
+      utf8_log = Ctx().to_utf8(log_msg)
       return { 'svn:author' : utf8_author,
                'svn:log'    : utf8_log,
                'svn:date'   : date }
@@ -190,16 +189,11 @@ class SVNInitialProjectCommit(SVNCommit):
     return 'New repository initialized by cvs2svn.'
 
   def commit(self, repos):
-    # FIXME: It would be nicer to create a project's TTB directories
-    # only after the first commit to the project.
-
     repos.start_commit(self.revnum, self._get_revprops())
-
-    for project in Ctx().projects:
-      repos.mkdir(project.trunk_path)
-      if not Ctx().trunk_only:
-        repos.mkdir(project.branches_path)
-        repos.mkdir(project.tags_path)
+    repos.mkdir(Ctx().project.trunk_path)
+    if not Ctx().trunk_only:
+      repos.mkdir(Ctx().project.branches_path)
+      repos.mkdir(Ctx().project.tags_path)
 
     repos.end_commit()
 
@@ -230,45 +224,45 @@ class SVNPrimaryCommit(SVNCommit, SVNRevisionCommit):
     Log().verbose("Committing %d CVSRevision%s"
                   % (len(self.cvs_revs), plural))
     for cvs_rev in self.cvs_revs:
-      if cvs_rev.op == OP_DELETE:
-        repos.delete_path(cvs_rev.svn_path, Ctx().prune)
-
-      elif (cvs_rev.rev == "1.1.1.1"
+      # See comment in CVSCommit._commit() for what this is all
+      # about.  Note that although asking repos.path_exists() is
+      # somewhat expensive, we only do it if the first two (cheap)
+      # tests succeed first.
+      if (cvs_rev.rev == "1.1.1.1"
           and not cvs_rev.deltatext_exists
           and repos.path_exists(cvs_rev.svn_path)):
-        # This change can be omitted.  See comment in
-        # CVSCommit._commit() for what this is all about.  Note that
-        # although asking repos.path_exists() is somewhat expensive,
-        # we only do it if the first two (cheap) tests succeed first.
+        # This change can be omitted.
         pass
-
-      elif cvs_rev.op == OP_ADD:
-        repos.add_path(cvs_rev)
-
-      elif cvs_rev.op == OP_CHANGE:
-        # Fix for Issue #74:
-        #
-        # Here's the scenario.  You have file FOO that is imported
-        # on a non-trunk vendor branch.  So in r1.1 and r1.1.1.1,
-        # the file exists.
-        #
-        # Moving forward in time, FOO is deleted on the default
-        # branch (r1.1.1.2).  cvs2svn determines that this delete
-        # also needs to happen on trunk, so FOO is deleted on
-        # trunk.
-        #
-        # Along come r1.2, whose op is OP_CHANGE (because r1.1 is
-        # not 'dead', we assume it's a change).  However, since
-        # our trunk file has been deleted, svnadmin blows up--you
-        # can't change a file that doesn't exist!
-        #
-        # Soooo... we just check the path, and if it doesn't
-        # exist, we do an add... if the path does exist, it's
-        # business as usual.
-        if not repos.path_exists(cvs_rev.svn_path):
+      else:
+        if cvs_rev.op == OP_ADD:
           repos.add_path(cvs_rev)
-        else:
-          repos.change_path(cvs_rev)
+        elif cvs_rev.op == OP_CHANGE:
+          # Fix for Issue #74:
+          #
+          # Here's the scenario.  You have file FOO that is imported
+          # on a non-trunk vendor branch.  So in r1.1 and r1.1.1.1,
+          # the file exists.
+          #
+          # Moving forward in time, FOO is deleted on the default
+          # branch (r1.1.1.2).  cvs2svn determines that this delete
+          # also needs to happen on trunk, so FOO is deleted on
+          # trunk.
+          #
+          # Along come r1.2, whose op is OP_CHANGE (because r1.1 is
+          # not 'dead', we assume it's a change).  However, since
+          # our trunk file has been deleted, svnadmin blows up--you
+          # can't change a file that doesn't exist!
+          #
+          # Soooo... we just check the path, and if it doesn't
+          # exist, we do an add... if the path does exist, it's
+          # business as usual.
+          if not repos.path_exists(cvs_rev.svn_path):
+            repos.add_path(cvs_rev)
+          else:
+            repos.change_path(cvs_rev)
+
+      if cvs_rev.op == OP_DELETE:
+        repos.delete_path(cvs_rev.svn_path, Ctx().prune)
 
     repos.end_commit()
 
@@ -287,7 +281,7 @@ class SVNSymbolCommit(SVNCommit):
   def __init__(self, description, symbol, revnum=None):
     SVNCommit.__init__(self, description, revnum)
 
-    # The TypedSymbol that is filled in this SVNCommit.
+    # The (uncleaned) symbolic name that is filled in this SVNCommit.
     self.symbol = symbol
 
   def _get_log_msg(self):
@@ -388,8 +382,7 @@ class SVNPostCommit(SVNCommit, SVNRevisionCommit):
                   % self._motivating_revnum)
 
     for cvs_rev in self.cvs_revs:
-      svn_trunk_path = cvs_rev.cvs_file.project.make_trunk_path(
-          cvs_rev.cvs_path)
+      svn_trunk_path = Ctx().project.make_trunk_path(cvs_rev.cvs_path)
       if cvs_rev.op == OP_ADD or cvs_rev.op == OP_CHANGE:
         if repos.path_exists(svn_trunk_path):
           # Delete the path on trunk...

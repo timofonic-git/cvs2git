@@ -20,8 +20,6 @@
 import time
 
 from cvs2svn_lib.boolean import *
-from cvs2svn_lib.context import Ctx
-from cvs2svn_lib.log import Log
 
 
 SVN_INVALID_REVNUM = -1
@@ -59,29 +57,6 @@ class FatalError(FatalException):
     FatalException.__init__(self, '%s: %s\n' % (error_prefix, msg,))
 
 
-class CommandError(FatalError):
-  """A FatalError caused by a failed command invocation.
-
-  The error message includes the command name, exit code, and output."""
-
-  def __init__(self, command, exit_status, error_output=''):
-    self.command = command
-    self.exit_status = exit_status
-    self.error_output = error_output
-    if error_output.rstrip():
-      FatalError.__init__(
-          self,
-          'The command %r failed with exit status=%s\n'
-          'and the following output:\n'
-          '%s'
-          % (self.command, self.exit_status, self.error_output.rstrip()))
-    else:
-      FatalError.__init__(
-          self,
-          'The command %r failed with exit status=%s and no output'
-          % (self.command, self.exit_status))
-
-
 def path_join(*components):
   """Join two or more pathname COMPONENTS, inserting '/' as needed.
   Empty component are skipped."""
@@ -112,21 +87,5 @@ def format_date(date):
   A Subversion date looks like '2002-09-29T14:44:59.000000Z'."""
 
   return time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.gmtime(date))
-
-
-def to_utf8(value, mode='replace'):
-  """Encode (as Unicode) VALUE, trying the encodings in Ctx().encoding
-  as valid source encodings.  Raise UnicodeError on failure of all
-  source encodings."""
-
-  ### FIXME: The 'replace' default mode should be an option,
-  ### like --encoding is.
-  for encoding in Ctx().encoding:
-    try:
-      return unicode(value, encoding, mode).encode('utf8')
-    except UnicodeError:
-      Log().verbose("Encoding '%s' failed for string '%s'"
-                    % (encoding, value))
-  raise UnicodeError
 
 

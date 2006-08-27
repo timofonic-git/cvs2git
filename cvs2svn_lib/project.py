@@ -75,17 +75,15 @@ OS_SEP_PLUS_ATTIC = os.sep + 'Attic'
 class Project:
   """A project within a CVS repository."""
 
-  def __init__(self, id, project_cvs_repos_path,
+  def __init__(self, project_cvs_repos_path,
                trunk_path, branches_path, tags_path):
     """Create a new Project record.
 
-    ID is a unique id for this project, also used as its index in
-    Ctx().projects.  PROJECT_CVS_REPOS_PATH is the main CVS directory
-    for this project (within the filesystem).  TRUNK_PATH,
-    BRANCHES_PATH, and TAGS_PATH are the full, normalized directory
-    names in svn for the corresponding part of the repository."""
+    PROJECT_CVS_REPOS_PATH is the main CVS directory for this project
+    (within the filesystem).  TRUNK_PATH, BRANCHES_PATH, and TAGS_PATH
+    are the full, normalized directory names in svn for the
+    corresponding part of the repository."""
 
-    self.id = id
     self.project_cvs_repos_path = os.path.normpath(project_cvs_repos_path)
 
     if Ctx().use_cvs:
@@ -109,12 +107,6 @@ class Project:
     verify_paths_disjoint(self.trunk_path, self.branches_path, self.tags_path)
     self._unremovable_paths = [
         self.trunk_path, self.branches_path, self.tags_path]
-
-  def __cmp__(self, other):
-    return cmp(self.id, other.id)
-
-  def __hash__(self):
-    return self.id
 
   def _get_cvs_path(self, filename):
     """Return the path to FILENAME relative to project_cvs_repos_path.
@@ -161,7 +153,7 @@ class Project:
 
     # mode is not known, so we temporarily set it to None.
     return CVSFile(
-        None, self, filename, self._get_cvs_path(canonical_filename),
+        None, filename, self._get_cvs_path(canonical_filename),
         file_in_attic, file_executable, file_size, None
         )
 
@@ -185,15 +177,17 @@ class Project:
 
     return svn_path in self._unremovable_paths
 
-  def get_branch_path(self, branch_symbol):
-    """Return the svnpath for BRANCH_SYMBOL."""
+  def get_branch_path(self, branch_name):
+    """Return the svnpath for the branch named BRANCH_NAME."""
 
-    return path_join(self.branches_path, branch_symbol.get_clean_name())
+    symbol = Ctx()._symbol_db.get_symbol_by_name(branch_name)
+    return path_join(self.branches_path, symbol.get_clean_name())
 
-  def get_tag_path(self, tag_symbol):
-    """Return the svnpath for TAG_SYMBOL."""
+  def get_tag_path(self, tag_name):
+    """Return the svnpath for the tag named TAG_NAME."""
 
-    return path_join(self.tags_path, tag_symbol.get_clean_name())
+    symbol = Ctx()._symbol_db.get_symbol_by_name(tag_name)
+    return path_join(self.tags_path, symbol.get_clean_name())
 
   def _relative_name(self, cvs_path):
     """Convert CVS_PATH into a name relative to this project's root directory.
@@ -217,10 +211,10 @@ class Project:
 
     return path_join(self.trunk_path, self._relative_name(cvs_path))
 
-  def make_branch_path(self, branch_symbol, cvs_path):
-    """Return the svn path for CVS_PATH on branch BRANCH_SYMBOL."""
+  def make_branch_path(self, branch_name, cvs_path):
+    """Return the svn path for CVS_PATH on branch BRANCH_NAME."""
 
-    return path_join(self.get_branch_path(branch_symbol),
+    return path_join(self.get_branch_path(branch_name),
                      self._relative_name(cvs_path))
 
 

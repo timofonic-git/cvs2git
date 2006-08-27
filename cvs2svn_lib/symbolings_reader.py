@@ -53,9 +53,9 @@ class SymbolingsReader:
   def filling_guide_for_symbol(self, symbol, svn_revnum):
     """Given SYMBOL and SVN_REVNUM, return a new SymbolFillingGuide object.
 
-    SYMBOL is a TypedSymbol instance.  Note that if we encounter an
-    opening rev in this fill, but the corresponding closing rev takes
-    place later than SVN_REVNUM, the closing will not be passed to
+    SYMBOL is a Symbol instance.  Note that if we encounter an opening
+    rev in this fill, but the corresponding closing rev takes place
+    later than SVN_REVNUM, the closing will not be passed to
     SymbolFillingGuide in this fill (and will be discarded when
     encountered in a later fill).  This is perfectly fine, because we
     can still do a valid fill without the closing--we always try to
@@ -80,11 +80,11 @@ class SymbolingsReader:
         cvs_file_id = int(cvs_file_id, 16)
         cvs_file = Ctx()._cvs_file_db.get_file(cvs_file_id)
         if branch_id == '*':
-          svn_path = cvs_file.project.make_trunk_path(cvs_file.cvs_path)
+          svn_path = Ctx().project.make_trunk_path(cvs_file.cvs_path)
         else:
           branch_id = int(branch_id, 16)
-          svn_path = cvs_file.project.make_branch_path(
-              Ctx()._symbol_db.get_symbol(branch_id), cvs_file.cvs_path)
+          svn_path = Ctx().project.make_branch_path(
+              Ctx()._symbol_db.get_name(branch_id), cvs_file.cvs_path)
         revnum = int(revnum)
         if revnum > svn_revnum or id != symbol.id:
           break

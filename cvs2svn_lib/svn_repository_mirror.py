@@ -29,8 +29,8 @@ from cvs2svn_lib.database import Database
 from cvs2svn_lib.database import SDatabase
 from cvs2svn_lib.database import DB_OPEN_NEW
 from cvs2svn_lib.database import DB_OPEN_READ
-from cvs2svn_lib.symbol import BranchSymbol
-from cvs2svn_lib.symbol import TagSymbol
+from cvs2svn_lib.symbol_database import BranchSymbol
+from cvs2svn_lib.symbol_database import TagSymbol
 from cvs2svn_lib.symbolings_reader import SymbolingsReader
 from cvs2svn_lib.fill_source import FillSource
 from cvs2svn_lib.svn_revision_range import SVNRevisionRange
@@ -58,13 +58,6 @@ class SVNRepositoryMirror:
 
   *** WARNING *** All path arguments to methods in this class CANNOT
       have leading or trailing slashes."""
-
-  class SVNRepositoryMirrorParentMissingError(Exception):
-    """Exception raised if an attempt is made to add a path to the
-    repository mirror but the parent's path doesn't exist in the youngest
-    revision of the repository."""
-
-    pass
 
   class SVNRepositoryMirrorPathExistsError(Exception):
     """Exception raised if an attempt is made to add a path to the
@@ -242,14 +235,11 @@ class SVNRepositoryMirror:
     In other words, SHOULD_PRUNE is like the -P option to 'cvs checkout'.
 
     NOTE: This function ignores requests to delete the root directory
-    or any directory for which any project's is_unremovable() method
-    returns True, either directly or by pruning."""
+    or any directory for which Ctx().project.is_unremovable() returns
+    True, either directly or by pruning."""
 
-    if svn_path == '':
+    if svn_path == '' or Ctx().project.is_unremovable(svn_path):
       return
-    for project in Ctx().projects:
-      if project.is_unremovable(svn_path):
-        return
 
     (parent_path, entry,) = path_split(svn_path)
     if parent_path:
@@ -306,14 +296,10 @@ class SVNRepositoryMirror:
     dest_parent_key, dest_parent_contents = \
                    self._open_writable_node(dest_parent, False)
 
-    if dest_parent_key is None:
-      raise self.SVNRepositoryMirrorParentMissingError(
-        "Attempt to add path '%s' to repository mirror, "
-        "but its parent directory doesn't exist in the mirror." % dest_path)
-    elif dest_basename in dest_parent_contents:
-      raise self.SVNRepositoryMirrorPathExistsError(
-        "Attempt to add path '%s' to repository mirror "
-        "when it already exists in the mirror." % dest_path)
+    if dest_basename in dest_parent_contents:
+      msg = "Attempt to add path '%s' to repository mirror " % dest_path
+      msg += "when it already exists in the mirror."
+      raise self.SVNRepositoryMirrorPathExistsError, msg
 
     dest_parent_contents[dest_basename] = src_key
     self._invoke_delegates('copy_path', src_path, dest_path, src_revnum)
@@ -325,7 +311,7 @@ class SVNRepositoryMirror:
   def fill_symbol(self, symbol):
     """Performs all copies necessary to create as much of the the tag
     or branch SYMBOL as possible given the current revision of the
-    repository mirror.  SYMBOL is an instance of TypedSymbol.
+    repository mirror.  SYMBOL is an instance of Symbol.
 
     The symbolic name is guaranteed to exist in the Subversion
     repository by the end of this call, even if there are no paths
@@ -338,17 +324,17 @@ class SVNRepositoryMirror:
 
     if sources:
       if isinstance(symbol, TagSymbol):
-        dest_prefix = symbol.project.get_tag_path(symbol)
+        dest_prefix = Ctx().project.get_tag_path(symbol.name)
       else:
         assert isinstance(symbol, BranchSymbol)
-        dest_prefix = symbol.project.get_branch_path(symbol)
+        dest_prefix = Ctx().project.get_branch_path(symbol.name)
 
       dest_key = self._open_writable_node(dest_prefix, False)[0]
       self._fill(symbol_fill, dest_prefix, dest_key, sources)
     else:
       # We can only get here for a branch whose first commit is an add
       # (as opposed to a copy).
-      dest_path = symbol.project.get_branch_path(symbol)
+      dest_path = Ctx().project.get_branch_path(symbol_fill.symbol.name)
       if not self.path_exists(dest_path):
         # If our symbol_fill was empty, that means that our first
         # commit on the branch was to a file added on the branch, and
@@ -358,7 +344,7 @@ class SVNRepositoryMirror:
         #
         # ...we create the branch by copying trunk from the our
         # current revision number minus 1
-        source_path = symbol.project.trunk_path
+        source_path = Ctx().project.trunk_path
         entries = self.copy_path(source_path, dest_path, self.youngest - 1)[1]
         # Now since we've just copied trunk to a branch that's
         # *supposed* to be empty, we delete any entries in the
@@ -368,12 +354,10 @@ class SVNRepositoryMirror:
           # Delete but don't prune.
           self.delete_path(del_path)
       else:
-        raise self.SVNRepositoryMirrorInvalidFillOperationError(
-          "Error filling branch '%s'.\n"
-          "Received an empty SymbolFillingGuide and\n"
-          "attempted to create a branch that already exists."
-          % symbol.get_clean_name()
-          )
+        msg = "Error filling branch '" + symbol.get_clean_name() + "'.\n"
+        msg += "Received an empty SymbolFillingGuide and\n"
+        msg += "attempted to create a branch that already exists."
+        raise self.SVNRepositoryMirrorInvalidFillOperationError, msg
 
   def _fill(self, symbol_fill, dest_prefix, dest_key, sources,
             path = None, parent_source_prefix = None,

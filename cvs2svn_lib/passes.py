@@ -40,9 +40,7 @@ from cvs2svn_lib.database import DB_OPEN_READ
 from cvs2svn_lib.database import DB_OPEN_WRITE
 from cvs2svn_lib.cvs_file_database import CVSFileDatabase
 from cvs2svn_lib.metadata_database import MetadataDatabase
-from cvs2svn_lib.symbol import BranchSymbol
-from cvs2svn_lib.symbol import TagSymbol
-from cvs2svn_lib.symbol import ExcludedSymbol
+from cvs2svn_lib.symbol_database import ExcludedSymbol
 from cvs2svn_lib.symbol_database import SymbolDatabase
 from cvs2svn_lib.symbol_database import create_symbol_database
 from cvs2svn_lib.line_of_development import Branch
@@ -55,6 +53,8 @@ from cvs2svn_lib.cvs_revision_aggregator import CVSRevisionAggregator
 from cvs2svn_lib.svn_repository_mirror import SVNRepositoryMirror
 from cvs2svn_lib.svn_commit import SVNInitialProjectCommit
 from cvs2svn_lib.persistence_manager import PersistenceManager
+from cvs2svn_lib.dumpfile_delegate import DumpfileDelegate
+from cvs2svn_lib.repository_delegate import RepositoryDelegate
 from cvs2svn_lib.stdout_delegate import StdoutDelegate
 from cvs2svn_lib.collect_data import CollectData
 from cvs2svn_lib.process import run_command
@@ -126,8 +126,7 @@ class CollectRevsPass(Pass):
     Log().quiet("Examining all CVS ',v' files...")
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_NEW)
     cd = CollectData(stats_keeper)
-    for project in Ctx().projects:
-      cd.process_project(project)
+    cd.process_project(Ctx().project)
     cd.write_symbol_stats()
 
     if cd.fatal_errors:
@@ -214,24 +213,10 @@ class ResyncRevsPass(Pass):
 
     return resync
 
-  def update_symbols(self, c_rev):
-    """Update c_rev.branch_ids and c_rev.tag_ids based on self.symbol_db."""
-
-    branch_ids = []
-    tag_ids = []
-    for id in c_rev.branch_ids + c_rev.tag_ids:
-      symbol = self.symbol_db.get_symbol(id)
-      if isinstance(symbol, BranchSymbol):
-        branch_ids.append(symbol.id)
-      elif isinstance(symbol, TagSymbol):
-        tag_ids.append(symbol.id)
-    c_rev.branch_ids = branch_ids
-    c_rev.tag_ids = tag_ids
-
   def run(self, stats_keeper):
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
-    self.symbol_db = SymbolDatabase()
-    Ctx()._symbol_db = self.symbol_db
+    symbol_db = SymbolDatabase()
+    Ctx()._symbol_db = symbol_db
     cvs_items_db = CVSItemDatabase(
         artifact_manager.get_temp_file(config.CVS_ITEMS_DB), DB_OPEN_WRITE)
     cvs_items_resync_db = CVSItemDatabase(
@@ -257,7 +242,7 @@ class ResyncRevsPass(Pass):
 
       # Skip this entire revision if it's on an excluded branch
       if isinstance(c_rev.lod, Branch):
-        symbol = self.symbol_db.get_symbol(c_rev.lod.id)
+        symbol = symbol_db.get_symbol(c_rev.lod.id)
         if isinstance(symbol, ExcludedSymbol):
           continue
 
@@ -271,7 +256,11 @@ class ResyncRevsPass(Pass):
       else:
         next_c_rev = None
 
-      self.update_symbols(c_rev)
+      (branches, tags) = symbol_db.collate_symbols(
+          c_rev.branch_ids + c_rev.tag_ids)
+
+      c_rev.branch_ids = [symbol.id for symbol in branches]
+      c_rev.tag_ids = [symbol.id for symbol in tags]
 
       # see if this is "near" any of the resync records we have
       # recorded for this metadata_id [of the log message].
@@ -346,7 +335,7 @@ class ResyncRevsPass(Pass):
           record[1] = max(record[1],
                           c_rev.timestamp + config.COMMIT_THRESHOLD/2)
 
-          msg = "PASS3 RESYNC: '%s' (%s): old time='%s' delta=%ds" \
+          msg = "PASS2 RESYNC: '%s' (%s): old time='%s' delta=%ds" \
                 % (c_rev.cvs_path, c_rev.rev, time.ctime(c_rev.timestamp),
                    new_timestamp - c_rev.timestamp)
           Log().verbose(msg)
@@ -522,7 +511,7 @@ class IndexSymbolsPass(Pass):
       id, svn_revnum, ignored = line.split(" ", 2)
       id = int(id, 16)
       if id != old_id:
-        Log().verbose(' ', Ctx()._symbol_db.get_symbol(id).name)
+        Log().verbose(' ', Ctx()._symbol_db.get_name(id))
         old_id = id
         offsets[id] = fpos
 
@@ -567,7 +556,14 @@ class OutputPass(Pass):
     repos = SVNRepositoryMirror()
     persistence_manager = PersistenceManager(DB_OPEN_READ)
 
-    Ctx().output_option.setup(repos)
+    if Ctx().target:
+      if not Ctx().dry_run:
+        repos.add_delegate(RepositoryDelegate())
+      Log().quiet("Starting Subversion Repository.")
+    else:
+      if not Ctx().dry_run:
+        repos.add_delegate(DumpfileDelegate())
+      Log().quiet("Starting Subversion Dumpfile.")
 
     repos.add_delegate(StdoutDelegate(stats_keeper.svn_rev_count()))
 
@@ -589,7 +585,5 @@ class OutputPass(Pass):
       svn_revnum += 1
 
     repos.finish()
-
-    Ctx().output_option.cleanup()
 
 

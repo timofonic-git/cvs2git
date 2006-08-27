@@ -23,9 +23,9 @@ from cvs2svn_lib.boolean import *
 from cvs2svn_lib.set_support import *
 from cvs2svn_lib.common import error_prefix
 from cvs2svn_lib.log import Log
-from cvs2svn_lib.symbol import BranchSymbol
-from cvs2svn_lib.symbol import TagSymbol
-from cvs2svn_lib.symbol import ExcludedSymbol
+from cvs2svn_lib.symbol_database import BranchSymbol
+from cvs2svn_lib.symbol_database import TagSymbol
+from cvs2svn_lib.symbol_database import ExcludedSymbol
 
 
 class StrategyRule:
@@ -45,7 +45,7 @@ class StrategyRule:
 class _RegexpStrategyRule(StrategyRule):
   """A Strategy rule that bases its decisions on regexp matches.
 
-  If self.regexp matches a symbol name, return self.action(symbol);
+  If self.regexp matches a symbol name, return self.action(id, name);
   otherwise, return None."""
 
   def __init__(self, pattern, action):
@@ -70,8 +70,8 @@ class _RegexpStrategyRule(StrategyRule):
     self.action = action
 
   def get_symbol(self, stats):
-    if self.regexp.match(stats.symbol.name):
-      return self.action(stats.symbol)
+    if self.regexp.match(stats.name):
+      return self.action(stats.id, stats.name)
     else:
       return None
 
@@ -107,9 +107,9 @@ class UnambiguousUsageRule(StrategyRule):
       # Can't decide
       return None
     elif is_branch:
-      return BranchSymbol(stats.symbol)
+      return BranchSymbol(stats.id, stats.name)
     elif is_tag:
-      return TagSymbol(stats.symbol)
+      return TagSymbol(stats.id, stats.name)
     else:
       # The symbol didn't appear at all:
       return None
@@ -120,7 +120,7 @@ class BranchIfCommitsRule(StrategyRule):
 
   def get_symbol(self, stats):
     if stats.branch_commit_count > 0:
-      return BranchSymbol(stats.symbol)
+      return BranchSymbol(stats.id, stats.name)
     else:
       return None
 
@@ -133,9 +133,9 @@ class HeuristicStrategyRule(StrategyRule):
 
   def get_symbol(self, stats):
     if stats.tag_create_count >= stats.branch_create_count:
-      return TagSymbol(stats.symbol)
+      return TagSymbol(stats.id, stats.name)
     else:
-      return BranchSymbol(stats.symbol)
+      return BranchSymbol(stats.id, stats.name)
 
 
 class AllBranchRule(StrategyRule):
@@ -146,7 +146,7 @@ class AllBranchRule(StrategyRule):
   therefore only apply to the symbols not handled earlier."""
 
   def get_symbol(self, stats):
-    return BranchSymbol(stats.symbol)
+    return BranchSymbol(stats.id, stats.name)
 
 
 class AllTagRule(StrategyRule):
@@ -160,7 +160,7 @@ class AllTagRule(StrategyRule):
   therefore only apply to the symbols not handled earlier."""
 
   def get_symbol(self, stats):
-    return TagSymbol(stats.symbol)
+    return TagSymbol(stats.id, stats.name)
 
 
 class SymbolStrategy:

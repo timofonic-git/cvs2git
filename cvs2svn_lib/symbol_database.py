@@ -24,22 +24,66 @@ from cvs2svn_lib import config
 from cvs2svn_lib.artifact_manager import artifact_manager
 
 
+class Symbol:
+  def __init__(self, id, name):
+    self.id = id
+    self.name = name
+
+  def get_clean_name(self):
+    """Return self.name, translating characters that Subversion does
+    not allow in a pathname.
+
+    Since the unofficial set also includes [/\] we need to translate
+    those into ones that don't conflict with Subversion
+    limitations."""
+
+    name = self.name
+    name = name.replace('/','++')
+    name = name.replace('\\','--')
+    return name
+
+
+class BranchSymbol(Symbol):
+  def __str__(self):
+    """For convenience only.  The format is subject to change at any time."""
+
+    return 'Branch %r <%x>' % (self.name, self.id,)
+
+
+class TagSymbol(Symbol):
+  def __str__(self):
+    """For convenience only.  The format is subject to change at any time."""
+
+    return 'Tag %r <%x>' % (self.name, self.id,)
+
+
+class ExcludedSymbol(Symbol):
+  def __str__(self):
+    """For convenience only.  The format is subject to change at any time."""
+
+    return 'ExcludedSymbol %r <%x>' % (self.name, self.id,)
+
+
 class SymbolDatabase:
   """Read-only access to symbol database.
 
-  This class allows lookups id -> symbol, where symbol is a
-  TypedSymbol instance.  The whole database is read into memory upon
+  The primary lookup mechanism is name -> symbol, where symbol is a
+  Symbol instance.  The whole database is read into memory upon
   construction."""
 
   def __init__(self):
-    # A map { id : TypedSymbol }
+    # A map { id : Symbol }
     self._symbols = {}
+
+    # A map { name : Symbol }
+    self._symbols_by_name = {}
 
     f = open(artifact_manager.get_temp_file(config.SYMBOL_DB), 'rb')
     symbols = cPickle.load(f)
     f.close()
     for symbol in symbols:
       self._symbols[symbol.id] = symbol
+      self._symbols_by_name[symbol.name] = symbol
 
   def get_symbol(self, id):
     """Return the symbol instance with id ID.
@@ -48,12 +92,53 @@ class SymbolDatabase:
 
     return self._symbols[id]
 
+  def get_symbol_by_name(self, name):
+    """Return the symbol instance with name NAME.
+
+    Return None if there is no such instance (for example, if NAME is
+    being excluded from the conversion)."""
+
+    return self._symbols_by_name.get(name)
+
+  def get_id(self, name):
+    """Return the id of the symbol with the specified NAME.
+
+    Raise a KeyError if there is no such symbol."""
+
+    return self._symbols_by_name[name].id
+
+  def get_name(self, id):
+    """Return the name of the symbol with the specified ID.
+
+    Raise a KeyError if there is no such symbol."""
+
+    return self._symbols[id].name
+
+  def collate_symbols(self, ids):
+    """Given an iterable of symbol ids, divide them into branches and tags.
+
+    Return a tuple of two lists (branches, tags), containing the
+    Symbol objects of symbols that should be converted as branches and
+    tags respectively.  Symbols that we do not know about are not
+    included in either output list."""
+
+    branches = []
+    tags = []
+    for id in ids:
+      symbol = self.get_symbol(id)
+      if isinstance(symbol, BranchSymbol):
+        branches.append(symbol)
+      elif isinstance(symbol, TagSymbol):
+        tags.append(symbol)
+
+    return (branches, tags,)
+
 
 def create_symbol_database(symbols):
   """Create and fill a symbol database.
 
   Record each symbol that is listed in SYMBOLS, which is an iterable
-  containing TypedSymbol objects."""
+  containing Symbol objects."""
 
   f = open(artifact_manager.get_temp_file(config.SYMBOL_DB), 'wb')
   cPickle.dump(symbols, f, -1)

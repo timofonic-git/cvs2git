@@ -24,15 +24,11 @@ from cvs2svn_lib.boolean import *
 
 
 class Log:
-  """A Simple logging facility.
-
-  Each line will be timestamped if self.use_timestamps is True.  This
-  class is a Borg, see
+  """A Simple logging facility.  Each line will be timestamped is
+  self.use_timestamps is TRUE.  This class is a Borg, see
   http://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/66531."""
 
-  # These constants represent the log levels that this class supports.
-  # The increase_verbosity() and decrease_verbosity() methods rely on
-  # these constants being consecutive integers:
+  # These constants represent the log levels that this class supports:
   WARN = -1
   QUIET = 0
   NORMAL = 1
@@ -45,15 +41,9 @@ class Log:
     if self.__dict__:
       return
     self.log_level = Log.NORMAL
-    # Set this to True if you want to see timestamps on each line output.
-    self.use_timestamps = False
+    # Set this to true if you want to see timestamps on each line output.
+    self.use_timestamps = None
     self.logger = sys.stdout
-
-  def increase_verbosity(self):
-    self.log_level = min(self.log_level + 1, self.VERBOSE)
-
-  def decrease_verbosity(self):
-    self.log_level = max(self.log_level - 1, self.WARN)
 
   def _timestamp(self):
     """Output a detailed timestamp at the beginning of each line output."""

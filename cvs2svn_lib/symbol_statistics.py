@@ -17,7 +17,6 @@
 """This module gathers and processes statistics about CVS symbols."""
 
 import sys
-import cPickle
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib.set_support import *
@@ -25,16 +24,18 @@ from cvs2svn_lib import config
 from cvs2svn_lib.common import error_prefix
 from cvs2svn_lib.log import Log
 from cvs2svn_lib.artifact_manager import artifact_manager
-from cvs2svn_lib.symbol import Symbol
-from cvs2svn_lib.symbol import TagSymbol
-from cvs2svn_lib.symbol import ExcludedSymbol
+from cvs2svn_lib.symbol_database import TagSymbol
+from cvs2svn_lib.symbol_database import ExcludedSymbol
+from cvs2svn_lib.key_generator import KeyGenerator
 
 
 class _Stats:
   """A summary of information about a symbol (tag or branch).
 
   Members:
-    symbol -- the Symbol instance of the symbol being described
+    id -- a unique id (integer)
+
+    name -- the name of the symbol
 
     tag_create_count -- the number of files on which this symbol
         appears as a tag
@@ -44,21 +45,24 @@ class _Stats:
 
     branch_commit_count -- the number of commits on this branch
 
-    branch_blockers -- a set of Symbol instances for any symbols that
-        sprout from a branch with this name."""
+    branch_blockers -- the names of any symbols that depend on the
+        branch."""
 
-  def __init__(self, symbol):
-    self.symbol = symbol
-    self.tag_create_count = 0
-    self.branch_create_count = 0
-    self.branch_commit_count = 0
-    self.branch_blockers = set()
+  def __init__(self, id, name, tag_create_count=0,
+               branch_create_count=0, branch_commit_count=0,
+               branch_blockers=[]):
+    self.id = id
+    self.name = name
+    self.tag_create_count = tag_create_count
+    self.branch_create_count = branch_create_count
+    self.branch_commit_count = branch_commit_count
+    self.branch_blockers = set(branch_blockers)
 
   def __str__(self):
     return (
-        '\'%s\' is a tag in %d files, a branch in '
+        '%r is a tag in %d files, a branch in '
         '%d files and has commits in %d files'
-        % (self.symbol, self.tag_create_count,
+        % (self.name, self.tag_create_count,
            self.branch_create_count, self.branch_commit_count))
 
 
@@ -80,47 +84,71 @@ class SymbolStatisticsCollector:
   (config.SYMBOL_STATISTICS_LIST)."""
 
   def __init__(self):
-    # A map { symbol -> record } for all symbols (branches and tags)
+    # A hash that maps symbol names to _Stats instances
+    self._stats_by_name = { }
+
+    # A map { id -> record } for all symbols (branches and tags)
     self._stats = { }
 
-  def _get_stats(self, symbol):
-    """Return the _Stats record for SYMBOL.
+    self._key_generator = KeyGenerator(1)
 
-    Create a new one if necessary."""
+  def _get_stats(self, name):
+    """Return the _Stats record for NAME, creating a new one if necessary."""
 
     try:
-      return self._stats[symbol]
+      return self._stats_by_name[name]
     except KeyError:
-      stats = _Stats(symbol)
-      self._stats[symbol] = stats
+      stats = _Stats(self._key_generator.gen_id(), name)
+      self._stats_by_name[name] = stats
+      self._stats[stats.id] = stats
       return stats
 
-  def register_tag_creation(self, symbol):
-    """Register the creation of the tag SYMBOL."""
+  def get_id(self, name):
+    return self._get_stats(name).id
 
-    self._get_stats(symbol).tag_create_count += 1
+  def register_tag_creation(self, name):
+    """Register the creation of the tag NAME.
 
-  def register_branch_creation(self, symbol):
-    """Register the creation of the branch SYMBOL."""
+    Return the tag record's id."""
 
-    self._get_stats(symbol).branch_create_count += 1
+    stats = self._get_stats(name)
+    stats.tag_create_count += 1
+    return stats.id
 
-  def register_branch_commit(self, symbol):
-    """Register a commit on the branch SYMBOL."""
+  def register_branch_creation(self, name):
+    """Register the creation of the branch NAME.
 
-    self._get_stats(symbol).branch_commit_count += 1
+    Return the branch record's id."""
 
-  def register_branch_blocker(self, symbol, blocker):
-    """Register BLOCKER as a blocker on the branch SYMBOL."""
+    stats = self._get_stats(name)
+    stats.branch_create_count += 1
+    return stats.id
 
-    self._get_stats(symbol).branch_blockers.add(blocker)
+  def register_branch_commit(self, name):
+    """Register a commit on the branch NAME."""
+
+    self._get_stats(name).branch_commit_count += 1
+
+  def register_branch_blocker(self, name, blocker):
+    """Register BLOCKER as a blocker on the branch NAME."""
+
+    self._get_stats(name).branch_blockers.add(blocker)
 
   def write(self):
-    """Store the stats database to the SYMBOL_STATISTICS_LIST file."""
+    """Store the stats database to file."""
 
     f = open(artifact_manager.get_temp_file(config.SYMBOL_STATISTICS_LIST),
-             'wb')
-    cPickle.dump(self._stats.values(), f, -1)
+             "w")
+    for stats in self._stats.values():
+      f.write(
+          "%x %s %d %d %d"
+          % (stats.id, stats.name, stats.tag_create_count,
+             stats.branch_create_count, stats.branch_commit_count)
+          )
+      if stats.branch_blockers:
+        f.write(' ')
+        f.write(' '.join(list(stats.branch_blockers)))
+      f.write('\n')
     f.close()
 
 
@@ -144,7 +172,7 @@ class SymbolStatistics:
 
      - A non-excluded branch depends on an excluded branch
 
-  The data in this class is read from a pickle file
+  The data in this class is read from a text file
   (config.SYMBOL_STATISTICS_LIST)."""
 
   def __init__(self):
@@ -153,16 +181,26 @@ class SymbolStatistics:
     # A hash that maps symbol names to _Stats instances
     self._stats_by_name = { }
 
-    # A map { Symbol -> _Stats } for all symbols (branches and tags)
+    # A map { id -> record } for all symbols (branches and tags)
     self._stats = { }
 
-    stats_list = cPickle.load(open(artifact_manager.get_temp_file(
-        config.SYMBOL_STATISTICS_LIST), 'rb'))
+    self._key_generator = KeyGenerator(1)
 
-    for stats in stats_list:
-      symbol = stats.symbol
-      self._stats_by_name[symbol.name] = stats
-      self._stats[symbol] = stats
+    for line in open(artifact_manager.get_temp_file(
+          config.SYMBOL_STATISTICS_LIST)):
+      words = line.split()
+      [id, name, tag_create_count,
+       branch_create_count, branch_commit_count] = words[:5]
+      branch_blockers = words[5:]
+      id = int(id, 16)
+      tag_create_count = int(tag_create_count)
+      branch_create_count = int(branch_create_count)
+      branch_commit_count = int(branch_commit_count)
+      stats = _Stats(
+          id, name, tag_create_count,
+          branch_create_count, branch_commit_count, branch_blockers)
+      self._stats_by_name[name] = stats
+      self._stats[stats.id] = stats
 
   def get_stats(self, name):
     """Return the _Stats object for the symbol named NAME.
@@ -184,11 +222,11 @@ class SymbolStatistics:
 
     blocked_branches = {}
     for stats in self:
-      if stats.symbol.name not in symbols:
-        blockers = [ blocker.name for blocker in stats.branch_blockers
-                     if blocker.name in symbols ]
+      if stats.name not in symbols:
+        blockers = [ blocker for blocker in stats.branch_blockers
+                     if blocker in symbols ]
         if blockers:
-          blocked_branches[stats.symbol.name] = set(blockers)
+          blocked_branches[stats.name] = set(blockers)
     return blocked_branches
 
   def _check_blocked_excludes(self, symbols):
@@ -228,7 +266,7 @@ class SymbolStatistics:
       if isinstance(symbol, TagSymbol):
         stats = self.get_stats(symbol.name)
         if stats.branch_commit_count > 0:
-          invalid_tags.append(stats.symbol.name)
+          invalid_tags.append(stats.name)
 
     if not invalid_tags:
       # No problems found:
@@ -245,9 +283,8 @@ class SymbolStatistics:
   def check_consistency(self, symbols):
     """Check the plan for how to convert symbols for consistency.
 
-    SYMBOLS is an iterable of TypedSymbol objects indicating how each
-    symbol is to be converted.  Return True iff any problems were
-    detected."""
+    SYMBOLS is an iterable of Symbol objects indicating how each name
+    is to be converted.  Return True iff any problems were detected."""
 
     # Create a map { symbol_name : Symbol } including only
     # non-excluded symbols:

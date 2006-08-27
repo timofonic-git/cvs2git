@@ -33,22 +33,19 @@ Making releases
         svn copy http://cvs2svn.tigris.org/svn/cvs2svn/trunk \
           http://cvs2svn.tigris.org/svn/cvs2svn/branches/A.B.x
       and then increment the -dev VERSION in cvs2svn on trunk.
-   2. Set the release date in CHANGES on trunk.
-   3. Switch to a branch working copy.
-   4. Merge CHANGES to the release branch.
-   5. Set VERSION in cvs2svn and then run:
+   2. Switch to a branch working copy.
+   3. Set VERSION in cvs2svn and then run:
         svn copy . http://cvs2svn.tigris.org/svn/cvs2svn/tags/A.B.C
-   6. Increment the -dev VERSION in cvs2svn on the A.B.x branch.
-   7. Switch to the tag.
-   8. Run:
+   4. Increment the -dev VERSION in cvs2svn on the A.B.x branch.
+   5. Switch to the tag.
+   6. Run:
         ./dist.sh
 
  Publishing the release:
-   9. Upload tarball to website download area.
-  10. Move old releases into the 'Old' folder of the download area.
-  11. Create a project announcement on the website.
-  12. Send an announcement to announce@cvs2svn.tigris.org.
-  13. Update the topic on #cvs2svn.
+   7. Upload tarball to website download area.
+   8. Move old releases into the 'Old' folder of the download area.
+   9. Create a project announcement on the website.
+  10. Send an announcement to announce@cvs2svn.tigris.org.
 
 
 Release announcement templates
@@ -59,36 +56,31 @@ as appropriate, and refer to previous announcements for examples.
 
 Web:
 [[[
-cvs2svn VERSION is now released.
+cvs2svn $VERSION is now released.
+The MD5 checksum is $CHECKSUM.
 <br />
-The MD5 checksum is CHECKSUM
+$BRIEF_DESCRIPTION
 <br />
-For more information see <a
-href="http://cvs2svn.tigris.org/source/browse/cvs2svn/tags/VERSION/CHANGES?view=markup"
->CHANGES</a>.
-<br />
-Download: <a
-href="http://cvs2svn.tigris.org/files/documents/1462/NNNNN/cvs2svn-VERSION.tar.gz"
->cvs2svn-VERSION.tar.gz</a>.
+It is available from <a href="$URL"
+>$URL</a>.
 ]]]
 
 Email:
 [[[
-Subject: cvs2svn VERSION released
+Subject: cvs2svn $VERSION released
 To: announce@cvs2svn.tigris.org
 Reply-to: users@cvs2svn.tigris.org
 
-cvs2svn VERSION is now released.
-
-The MD5 checksum is CHECKSUM.
-
-For more information see:
-http://cvs2svn.tigris.org/source/browse/cvs2svn/tags/VERSION/CHANGES?view=markup
+cvs2svn $VERSION is released.
 
 You can get it here:
-http://cvs2svn.tigris.org/files/documents/1462/NNNNN/cvs2svn-VERSION.tar.gz
+$URL
+MD5 checksum: $CHECKSUM
+
+$BRIEF_DESCRIPTION
 
 Please send any bug reports and comments to users@cvs2svn.tigris.org.
 
-YOUR_NAME, on behalf of the cvs2svn development team.
+$YOUR_NAME, on behalf of the cvs2svn development team
 ]]]
+

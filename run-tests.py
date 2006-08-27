@@ -2214,27 +2214,6 @@ def tag_symbol_default():
      raise svntest.Failure
 
 
-def issue_99():
-  "test problem from issue 99"
-
-  conv = ensure_conversion('issue-99')
-
-
-def issue_100():
-  "test problem from issue 100"
-
-  conv = ensure_conversion('issue-100')
-  file1 = conv.get_wc('trunk', 'file1.txt')
-  if file(file1).read() != 'file1.txt<1.2>\n':
-    raise svntest.Failure
-
-
-def issue_106():
-  "test problem from issue 106"
-
-  conv = ensure_conversion('issue-106')
-
-
 #----------------------------------------------------------------------
 
 ########################################################################
@@ -2322,9 +2301,6 @@ test_list = [ None,
               heuristic_symbol_default,
               branch_symbol_default,
               tag_symbol_default,                   # 80
-              XFail(issue_99),
-              XFail(issue_100),
-              XFail(issue_106),
               ]
 
 if __name__ == '__main__':
