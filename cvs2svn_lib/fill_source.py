@@ -47,13 +47,10 @@ class FillSource:
 
     if self.score is None or other.score is None:
       raise TypeError, 'Tried to compare unscored FillSource'
-    elif other.score != self.score:
-      return cmp(other.score, self.score)
-    elif self.prefix == Ctx().project.trunk_path:
-      return -1
-    elif other.prefix == Ctx().project.trunk_path:
-      return 1
-    else:
-      return cmp(self.prefix, other.prefix)
+
+    return cmp(other.score, self.score) \
+           or cmp(other.prefix == Ctx().project.trunk_path,
+                  self.prefix == Ctx().project.trunk_path) \
+           or cmp(self.prefix, other.prefix)
 
 
