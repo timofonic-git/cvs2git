@@ -151,8 +151,9 @@ class SymbolingsLogger:
           # Find the best candidate branch to open NAME.
           best_branch = self.pairings_db.tags.get(name)
           if best_branch in c_rev.branches:
-            self.branchings.write('%x %d %s %s\n' %
-                                  (c_rev.cvs_file.id, svn_revnum, name, best_branch))
+            self.branchings.write(
+                '%x %d %s %s\n' %
+                (c_rev.cvs_file.id, svn_revnum, name, best_branch))
 
       # If our c_rev has a next_rev, then that's the closing rev for
       # this source revision.  Log it to closings for later processing
@@ -166,7 +167,6 @@ class SymbolingsLogger:
     # each revision would be even worse, and we need the name of the
     # opened symbol.
     if c_rev.prev_id and c_rev.first_on_branch:
-      print 'this:', c_rev.rev, 'rev: ', c_rev.prev_id, 'type:', type(c_rev.prev_id)
       prev_rev = self.cvs_items_db[c_rev.prev_id]
       if prev_rev.op != OP_DELETE:
         for name in prev_rev.branches + prev_rev.tags:
