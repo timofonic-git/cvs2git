@@ -19,59 +19,50 @@
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib import config
-from cvs2svn_lib.common import DB_OPEN_NEW
 from cvs2svn_lib.common import OP_DELETE
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.artifact_manager import artifact_manager
-from cvs2svn_lib.cvs_item import CVSRevision
 from cvs2svn_lib.database import Database
+from cvs2svn_lib.database import DB_OPEN_NEW
 
 
 class LastSymbolicNameDatabase:
-  """Passing every changeset in s-revs to this class will result in a
-  Database whose key is the last changeset a symbolic name was seen
-  in, and whose value is a list of all symbolicnames that were last
-  seen in that changeset."""
+  """Passing every CVSRevision in s-revs to this class will result in
+  a Database whose key is the last CVS Revision a symbolicname was
+  seen in, and whose value is a list of all symbolicnames that were
+  last seen in that revision."""
 
   def __init__(self):
-    # A map { symbol_id : changeset_id } of the id of the
-    # chronologically last Changeset that had the symbol as a tag or
-    # branch.  Once we've gone through all the changesets,
-    # symbols.keys() will be a list of all tag and branch symbol_ids,
-    # and their corresponding values will be the id of the changeset
-    # containing the last CVS revision that the symbol was used in.
+    # A map { symbol_id : cvs_rev.id } of the chronologically last
+    # CVSRevision that had the symbol as a tag or branch.  Once we've
+    # gone through all the revs, symbols.keys() will be a list of all
+    # tag and branch symbol_ids, and their corresponding values will
+    # be the id of the last CVS revision that they were used in.
     self._symbols = {}
 
-  def log_changeset(self, changeset):
-    """Log all of the CVSRevisions in the changeset."""
+  def log_revision(self, cvs_rev):
+    """Gather last CVS Revision for symbolic name info and tag info."""
 
-    for cvs_item in changeset.get_cvs_items():
-      if isinstance(cvs_item, CVSRevision):
-        cvs_rev = cvs_item
-        for tag_id in cvs_rev.tag_ids:
-          cvs_tag = Ctx()._cvs_items_db[tag_id]
-          self._symbols[cvs_tag.symbol.id] = changeset.id
-        if cvs_rev.op != OP_DELETE:
-          for branch_id in cvs_rev.branch_ids:
-            cvs_branch = Ctx()._cvs_items_db[branch_id]
-            self._symbols[cvs_branch.symbol.id] = changeset.id
+    for tag_id in cvs_rev.tag_ids:
+      self._symbols[tag_id] = cvs_rev.id
+    if cvs_rev.op != OP_DELETE:
+      for branch_id in cvs_rev.branch_ids:
+        self._symbols[branch_id] = cvs_rev.id
 
   def create_database(self):
-    """Create the SYMBOL_LAST_CHANGESETS_DB.
+    """Create the SYMBOL_LAST_CVS_REVS_DB.
 
     The database will hold an inversion of symbols above--a map {
-    changeset.id : [ symbol, ... ] of symbols that close in each
-    changeset."""
-
-    symbol_revs = {}
-    for symbol_id, changeset_id in self._symbols.iteritems():
-      symbol_revs.setdefault(changeset_id, []).append(symbol_id)
+    cvs_rev.id : [ symbol, ... ] of symbols that close in each
+    CVSRevision."""
 
     symbol_revs_db = Database(
-        artifact_manager.get_temp_file(config.SYMBOL_LAST_CHANGESETS_DB),
+        artifact_manager.get_temp_file(config.SYMBOL_LAST_CVS_REVS_DB),
         DB_OPEN_NEW)
-    for (changeset_id, symbol_ids) in symbol_revs.iteritems():
-      symbol_revs_db['%x' % changeset_id] = symbol_ids
-    symbol_revs_db.close()
+    for symbol_id, rev_id in self._symbols.items():
+      rev_key = '%x' % (rev_id,)
+      ary = symbol_revs_db.get(rev_key, [])
+      ary.append(symbol_id)
+      symbol_revs_db[rev_key] = ary
 
 

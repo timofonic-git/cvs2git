@@ -24,30 +24,23 @@ from cvs2svn_lib import config
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.artifact_manager import artifact_manager
 from cvs2svn_lib.database import Database
-from cvs2svn_lib.database import DB_OPEN_READ
-from cvs2svn_lib.database import DB_OPEN_WRITE
-from cvs2svn_lib.database import DB_OPEN_NEW
 from cvs2svn_lib.key_generator import KeyGenerator
 
 
 class MetadataDatabase:
   """A Database to store metadata about CVSRevisions.
 
-  This database manages a map
+  This database has two types of entries:
 
-      id -> (project.id, author, log_msg,)
+      digest -> id
 
-  where id is a unique identifier for a set of metadata.
+      hex(id) -> (project.id, author, log_msg,)
 
-  When the MetadataDatabase is opened in DB_OPEN_NEW mode, the mapping
-
-      { (project, branch_name, author, log_msg) -> id }
-
-  is also available.  If the requested set of metadata has never been
-  seen before, a new record is created and its id is returned.  This
-  is done by creating an SHA digest of a string containing author,
-  log_message, and possible project_id and/or branch_name, then
-  looking up the digest in the _digest_to_id map.
+  Digest is the digest of the string (project.id + '\0' + author +
+  '\0' + log_msg) (or, if Ctx().cross_project_commits is True, (author
+  + '\0' + log_msg)), and is used to locate matching records
+  efficiently.  id is a unique id for each record (as a hex string
+  ('%x' % id) when used as a key).
 
   """
 
@@ -56,53 +49,36 @@ class MetadataDatabase:
     argument to Database or anydbm.open()).  Use CVS_FILE_DB to look
     up CVSFiles."""
 
-    if mode == DB_OPEN_NEW:
-      # A map { digest : id }:
-      self._digest_to_id = {}
-
-      # A key_generator to generate keys for metadata that haven't
-      # been seen yet:
-      self.key_generator = KeyGenerator(1)
-    elif mode == DB_OPEN_READ:
-      # In this case, we don't need key_generator or _digest_to_id.
-      pass
-    elif mode == DB_OPEN_WRITE:
-      # Modifying an existing database is not supported:
-      raise NotImplementedError('Mode %r is not supported' % mode)
-
+    self.key_generator = KeyGenerator(1)
     self.db = Database(artifact_manager.get_temp_file(config.METADATA_DB),
                        mode)
 
-  def get_key(self, project, branch_name, author, log_msg):
-      """Return the id for the specified metadata.
+  def get_key(self, project, author, log_msg):
+      """Return the id for the record for (PROJECT, AUTHOR, LOG_MSG,).
 
-      Locate the record for a commit with the specified (PROJECT,
-      BRANCH_NAME, AUTHOR, LOG_MSG).  (Depending on policy, not all of
-      these items are necessarily used when creating the unique id.)
       If there is no such record, create one and return its
       newly-generated id."""
 
-      key = [author, log_msg]
-      if not Ctx().cross_project_commits:
-        key.append('%x' % project.id)
-      if not Ctx().cross_branch_commits:
-        key.append(branch_name or '')
+      if Ctx().cross_project_commits:
+        s = '%s\0%s' % (author, log_msg)
+      else:
+        s = '%x\0%s\0%s' % (project.id, author, log_msg)
 
-      digest = sha.new('\0'.join(key)).digest()
+      digest = sha.new(s).hexdigest()
       try:
           # See if it is already known:
-          return self._digest_to_id[digest]
+          return self.db[digest]
       except KeyError:
           pass
 
       id = self.key_generator.gen_id()
-      self._digest_to_id[digest] = id
-      self.db['%x' % id] = (author, log_msg,)
+      self.db['%x' % id] = (project.id, author, log_msg,)
+      self.db[digest] = id
       return id
 
   def __getitem__(self, id):
     """Return (author, log_msg,) for ID."""
 
-    return self.db['%x' % (id,)]
+    return self.db['%x' % (id,)][1:]
 
 

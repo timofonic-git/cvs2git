@@ -29,7 +29,7 @@ class CVSFile(object):
   key_generator = KeyGenerator(1)
 
   def __init__(self, id, project, filename, cvs_path,
-               executable, file_size, mode):
+               in_attic, executable, file_size, mode):
     """Initialize a new CVSFile object.
 
     Arguments:
@@ -40,6 +40,7 @@ class CVSFile(object):
       FILENAME           --> (string) the filesystem path to the CVS file
       CVS_PATH           --> (string) the canonical path within the CVS
                              project (no 'Attic', no ',v', forward slashes)
+      IN_ATTIC           --> (bool) True iff RCS file is in Attic
       EXECUTABLE         --> (bool) True iff RCS file has executable bit set
       FILE_SIZE          --> (long) size of the RCS file in bytes
       MODE               --> (string or None) 'kkv', 'kb', etc."""
@@ -52,17 +53,18 @@ class CVSFile(object):
     self.project = project
     self.filename = filename
     self.cvs_path = cvs_path
+    self.in_attic = in_attic
     self.executable = executable
     self.file_size = file_size
     self.mode = mode
 
   def __getstate__(self):
     return (self.id, self.project.id, self.filename, self.cvs_path,
-            self.executable, self.file_size, self.mode,)
+            self.in_attic, self.executable, self.file_size, self.mode,)
 
   def __setstate__(self, state):
     (self.id, project_id, self.filename, self.cvs_path,
-     self.executable, self.file_size, self.mode,) = state
+     self.in_attic, self.executable, self.file_size, self.mode,) = state
     self.project = Ctx().projects[project_id]
 
   def get_basename(self):

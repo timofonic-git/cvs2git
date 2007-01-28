@@ -60,31 +60,6 @@ except NameError:
       def pop(self):
         return self._dict.popitem()[0]
 
-      def difference(self, other):
-        retval = set()
-        for x in self:
-          if x not in other:
-            retval.add(x)
-
-        return retval
-
-      def __sub__(self, other):
-        return self.difference(other)
-
-      def __and__(self, other):
-        """Set intersection."""
-
-        if len(self) <= len(other):
-          s1, s2 = self, other
-        else:
-          s1, s2 = other, self
-
-        retval = set()
-        for x in s1:
-          if x in s2:
-            retval.add(x)
-        return retval
-
       def __repr__(self):
         return 'Set(%r)' % (self._dict.keys(),)
 

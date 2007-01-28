@@ -41,8 +41,6 @@ from cvs2svn_lib.project import Project
 from cvs2svn_lib.output_option import DumpfileOutputOption
 from cvs2svn_lib.output_option import ExistingRepositoryOutputOption
 from cvs2svn_lib.output_option import NewRepositoryOutputOption
-from cvs2svn_lib.revision_reader import RCSRevisionReader
-from cvs2svn_lib.revision_reader import CVSRevisionReader
 from cvs2svn_lib.symbol_strategy import AllBranchRule
 from cvs2svn_lib.symbol_strategy import AllTagRule
 from cvs2svn_lib.symbol_strategy import BranchIfCommitsRule
@@ -54,15 +52,15 @@ from cvs2svn_lib.symbol_strategy import RuleBasedSymbolStrategy
 from cvs2svn_lib.symbol_strategy import UnambiguousUsageRule
 from cvs2svn_lib.symbol_transform import RegexpSymbolTransform
 from cvs2svn_lib.property_setters import AutoPropsPropertySetter
-from cvs2svn_lib.property_setters import CVSBinaryFileDefaultMimeTypeSetter
-from cvs2svn_lib.property_setters import CVSBinaryFileEOLStyleSetter
+from cvs2svn_lib.property_setters import BinaryFileDefaultMimeTypeSetter
+from cvs2svn_lib.property_setters import BinaryFileEOLStyleSetter
 from cvs2svn_lib.property_setters import CVSRevisionNumberSetter
 from cvs2svn_lib.property_setters import DefaultEOLStyleSetter
 from cvs2svn_lib.property_setters import EOLStyleFromMimeTypeSetter
 from cvs2svn_lib.property_setters import ExecutablePropertySetter
 from cvs2svn_lib.property_setters import KeywordsPropertySetter
 from cvs2svn_lib.property_setters import MimeMapper
-from cvs2svn_lib.property_setters import SVNBinaryFileKeywordsPropertySetter
+
 
 # To choose the level of logging output, uncomment one of the
 # following lines:
@@ -109,11 +107,10 @@ ctx.output_option = NewRepositoryOutputOption(
 # can be set to True to suppress cvs2svn output altogether:
 ctx.dry_run = False
 
-# Change the following to CVSRevisionReader() if cvs2svn should use
-# "cvs" to read file versions out of *,v files.  (The default is to
-# use "co", which is part of RCS, and is much faster):
-ctx.revision_reader = RCSRevisionReader()
-#ctx.revision_reader = CVSRevisionReader()
+# Change the following if cvs2svn should use "cvs" to read file
+# versions out of *,v files.  (The default is to use "co", which is
+# part of RCS, and is much faster):
+ctx.use_cvs = False
 
 # Set the name (and optionally the path) of some executables required
 # by cvs2svn.  'co' is needed by default; 'cvs' is needed if
@@ -206,7 +203,19 @@ ctx.username = None
 # the rules are tried one by one.  Any rule can add or suppress one or
 # more svn properties.  Typically the rules will not overwrite
 # properties set by a previous rule (though they are free to do so).
-ctx.svn_property_setters.extend([
+ctx.svn_property_setters = [
+    # Set the svn:executable flag on any files that are marked in CVS as
+    # being executable:
+    ExecutablePropertySetter(),
+
+    # Omit the svn:eol-style property from any files that are listed as
+    # binary in CVS:
+    BinaryFileEOLStyleSetter(),
+
+    # To read mime types from a file, uncomment the following line and
+    # specify a filename:
+    #MimeMapper('/etc/mime.types'),
+
     # To read auto-props rules from a file, uncomment the following line
     # and specify a filename.  The boolean argument specifies whether
     # case should be ignored when matching filenames to the filename
@@ -216,17 +225,9 @@ ctx.svn_property_setters.extend([
     #    False,
     #    ),
 
-    # To read mime types from a file, uncomment the following line and
-    # specify a filename:
-    #MimeMapper('/etc/mime.types'),
-
-    # Omit the svn:eol-style property from any files that are listed
-    # as binary (i.e., mode '-kb') in CVS:
-    CVSBinaryFileEOLStyleSetter(),
-
     # If the file is binary and its svn:mime-type property is not yet
     # set, set svn:mime-type to 'application/octet-stream'.
-    CVSBinaryFileDefaultMimeTypeSetter(),
+    BinaryFileDefaultMimeTypeSetter(),
 
     # To try to determine the eol-style from the mime type, uncomment
     # the following line:
@@ -239,23 +240,15 @@ ctx.svn_property_setters.extend([
     #DefaultEOLStyleSetter(None)
     DefaultEOLStyleSetter('native'),
 
-    # Prevent svn:keywords from being set on files that have
-    # svn:eol-style unset.
-    SVNBinaryFileKeywordsPropertySetter(),
-
     # If svn:keywords has not been set yet, set it based on the file's
     # CVS mode:
     KeywordsPropertySetter(config.SVN_KEYWORDS_VALUE),
-
-    # Set the svn:executable flag on any files that are marked in CVS as
-    # being executable:
-    ExecutablePropertySetter(),
 
     # Uncomment the following line to include the original CVS revision
     # numbers as file properties in the SVN archive:
     #CVSRevisionNumberSetter(),
 
-    ])
+    ]
 
 # The directory to use for temporary files:
 ctx.tmpdir = 'tmp'
@@ -267,18 +260,6 @@ ctx.tmpdir = 'tmp'
 # To prevent CVS commits from different projects from being merged
 # into single SVN commits, change this option to False:
 ctx.cross_project_commits = True
-
-# To prevent CVS commits on different branches from being merged into
-# single SVN commits, change this option to False:
-ctx.cross_branch_commits = True
-
-# By default, it is a fatal error for a CVS ",v" file to appear both
-# inside and outside of an "Attic" subdirectory (this should never
-# happen, but frequently occurs due to botched repository
-# administration).  If you would like to retain both versions of such
-# files, change the following option to True, and the attic version of
-# the file will be left in an SVN subdirectory called "Attic":
-ctx.retain_conflicting_attic_files = False
 
 # Now use stanzas like the following to define CVS projects that
 # should be converted.  The arguments are:

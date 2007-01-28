@@ -40,21 +40,17 @@ class SVNCommitItem:
     self.svn_props_changed = svn_props_changed
 
     # The properties for this item as a map { key : value }.  If VALUE
-    # is None, the property should be left unset.
+    # is None, no property should be set.
     self.svn_props = { }
 
     for svn_property_setter in Ctx().svn_property_setters:
       svn_property_setter.set_properties(self)
 
-  def needs_eol_filter(self):
-    """Return True iff EOLs needs to be filtered for this item.
+    # Remember if we need to filter the EOLs.  We could actually use
+    # self.svn_props now, since it is initialized for each revision.
+    self.needs_eol_filter = \
+        self.svn_props.get('svn:eol-style', None) is not None
 
-    This returns true for any svn:eol-style that does not indicate a
-    binary file."""
-
-    return bool(self.svn_props.get('svn:eol-style', None))
-
-  def has_keywords(self):
-    return bool(self.svn_props.get('svn:keywords', None))
+    self.has_keywords = self.svn_props.get('svn:keywords', None) is not None
 
 

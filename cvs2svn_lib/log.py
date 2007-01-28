@@ -26,13 +26,8 @@ from cvs2svn_lib.boolean import *
 class Log:
   """A Simple logging facility.
 
-  If self.log_level is DEBUG or higher, each line will be timestamped
-  with the number of seconds since the start of the program run.
-
-  If self.use_timestamps is True, each line will be timestamped with a
-  human-readable clock time.
-
-  This class is a Borg; see
+  Each line will be timestamped if self.use_timestamps is True.  This
+  class is a Borg, see
   http://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/66531."""
 
   # These constants represent the log levels that this class supports.
@@ -42,7 +37,6 @@ class Log:
   QUIET = 0
   NORMAL = 1
   VERBOSE = 2
-  DEBUG = 3
 
   __shared_state = {}
 
@@ -54,70 +48,50 @@ class Log:
     # Set this to True if you want to see timestamps on each line output.
     self.use_timestamps = False
     self.logger = sys.stdout
-    self.start_time = time.time()
 
   def increase_verbosity(self):
-    self.log_level = min(self.log_level + 1, Log.DEBUG)
+    self.log_level = min(self.log_level + 1, self.VERBOSE)
 
   def decrease_verbosity(self):
-    self.log_level = max(self.log_level - 1, Log.WARN)
-
-  def is_on(self, level):
-    """Return True iff messages at the specified LEVEL are currently on.
-
-    LEVEL should be one of the constants Log.WARN, Log.QUIET, etc."""
-
-    return self.log_level >= level
+    self.log_level = max(self.log_level - 1, self.WARN)
 
   def _timestamp(self):
-    """Return a timestamp if needed."""
+    """Output a detailed timestamp at the beginning of each line output."""
 
-    retval = []
-
-    if self.log_level >= Log.DEBUG:
-      retval.append('%f:' % (time.time() - self.start_time,))
-
-    if self.use_timestamps:
-      retval.append(time.strftime('[%Y-%m-%d %I:%m:%S %Z] -'))
-
-    return retval
+    self.logger.write(time.strftime('[%Y-%m-%d %I:%m:%S %Z] - '))
 
   def write(self, log_level, *args):
-    """Write a message to the log at level LOG_LEVEL.
-
-    This is the public method to use for writing to a file.  Only
+    """This is the public method to use for writing to a file.  Only
     messages whose LOG_LEVEL is <= self.log_level will be printed.  If
-    there are multiple ARGS, they will be separated by spaces."""
+    there are multiple ARGS, they will be separated by a space."""
 
-    if self.is_on(log_level):
-      self.logger.write(' '.join(self._timestamp() + map(str, args)) + "\n")
-      # Ensure that log output doesn't get out-of-order with respect to
-      # stderr output.
-      self.logger.flush()
+    if log_level > self.log_level:
+      return
+    if self.use_timestamps:
+      self._timestamp()
+    self.logger.write(' '.join(map(str,args)) + "\n")
+    # Ensure that log output doesn't get out-of-order with respect to
+    # stderr output.
+    self.logger.flush()
 
   def warn(self, *args):
     """Log a message at the WARN level."""
 
-    self.write(Log.WARN, *args)
+    self.write(self.WARN, *args)
 
   def quiet(self, *args):
     """Log a message at the QUIET level."""
 
-    self.write(Log.QUIET, *args)
+    self.write(self.QUIET, *args)
 
   def normal(self, *args):
     """Log a message at the NORMAL level."""
 
-    self.write(Log.NORMAL, *args)
+    self.write(self.NORMAL, *args)
 
   def verbose(self, *args):
     """Log a message at the VERBOSE level."""
 
-    self.write(Log.VERBOSE, *args)
-
-  def debug(self, *args):
-    """Log a message at the DEBUG level."""
-
-    self.write(Log.DEBUG, *args)
+    self.write(self.VERBOSE, *args)
 
 

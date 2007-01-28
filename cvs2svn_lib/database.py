@@ -26,14 +26,11 @@ import cStringIO
 import cPickle
 
 from cvs2svn_lib.boolean import *
-from cvs2svn_lib.common import DB_OPEN_READ
-from cvs2svn_lib.common import DB_OPEN_WRITE
-from cvs2svn_lib.common import DB_OPEN_NEW
 from cvs2svn_lib.common import warning_prefix
 from cvs2svn_lib.common import error_prefix
-from cvs2svn_lib.record_table import FileOffsetPacker
-from cvs2svn_lib.record_table import RecordTable
-from cvs2svn_lib.serializer import PrimedPickleSerializer
+from cvs2svn_lib.primed_pickle import get_memos
+from cvs2svn_lib.primed_pickle import PrimedPickler
+from cvs2svn_lib.primed_pickle import PrimedUnpickler
 
 
 # DBM module selection
@@ -73,6 +70,12 @@ if hasattr(anydbm._defaultmod, 'bsddb') \
     anydbm._defaultmod = gdbm
 
 
+# Always use these constants for opening databases.
+DB_OPEN_READ = 'r'
+DB_OPEN_WRITE = 'w'
+DB_OPEN_NEW = 'n'
+
+
 class AbstractDatabase:
   """An abstract base class for anydbm-based databases."""
 
@@ -101,7 +104,7 @@ class AbstractDatabase:
     # *values*, because our derived classes define __getitem__ and
     # __setitem__ to override the storage of values, and grabbing
     # methods directly from the dbm object would bypass this.
-    for meth_name in ('__delitem__',
+    for meth_name in ('__delitem__', 'keys',
         '__iter__', 'has_key', '__contains__', 'iterkeys', 'clear'):
       meth_ref = getattr(self.db, meth_name, None)
       if meth_ref:
@@ -111,9 +114,6 @@ class AbstractDatabase:
     # gdbm defines a __delitem__ method, but it cannot be assigned.  So
     # this method provides a fallback definition via explicit delegation:
     del self.db[key]
-
-  def keys(self):
-    return self.db.keys()
 
   def __iter__(self):
     for key in self.keys():
@@ -148,8 +148,15 @@ class AbstractDatabase:
     except KeyError:
       return default
 
-  def close(self):
-    self.db.close()
+
+class SDatabase(AbstractDatabase):
+  """A database that can only store strings."""
+
+  def __getitem__(self, key):
+    return self.db[key]
+
+  def __setitem__(self, key, value):
+    self.db[key] = value
 
 
 class Database(AbstractDatabase):
@@ -184,135 +191,35 @@ class PrimedPDatabase(AbstractDatabase):
 
   Concretely, when a new database is created, the pickler memo and
   unpickler memo for PRIMER are computed, pickled, and stored in
-  db[self.pickler_pair_key] as a tuple.  When an existing database is
-  opened for reading or update, the pickler and unpickler memos are
-  read from db[self.pickler_pair_key].  In either case, these memos
-  are used to initialize a PrimedPickler and PrimedUnpickler, which
-  are used for future write and read accesses respectively.
+  db[self.primer_key] as a tuple.  When an existing database is opened
+  for reading or update, the pickler and unpickler memos are read from
+  db[self.primer_key].  In either case, these memos are used to
+  initialize a PrimedPickler and PrimedUnpickler, which are used for
+  future write and read accesses respectively.
 
-  Since the database entry with key self.pickler_pair_key is used to
-  store the memo, self.pickler_pair_key may not be used as a key for
-  normal entries."""
+  Since the database entry with key self.primer_key is used to store
+  the memo, self.primer_key may not be used as a key for normal
+  entries."""
 
-  pickler_pair_key = '_'
+  primer_key = '_'
 
   def __init__(self, filename, mode, primer):
     AbstractDatabase.__init__(self, filename, mode)
 
     if mode == DB_OPEN_NEW:
-      self.serializer = PrimedPickleSerializer(primer)
-      self.db[self.pickler_pair_key] = cPickle.dumps(self.serializer)
+      pickler_memo, unpickler_memo = get_memos(primer)
+      self.db[self.primer_key] = \
+          cPickle.dumps((pickler_memo, unpickler_memo,))
     else:
-      self.serializer = cPickle.loads(self.db[self.pickler_pair_key])
+      (pickler_memo, unpickler_memo,) = \
+          cPickle.loads(self.db[self.primer_key])
+    self.primed_pickler = PrimedPickler(pickler_memo)
+    self.primed_unpickler = PrimedUnpickler(unpickler_memo)
 
   def __getitem__(self, key):
-    return self.serializer.loads(self.db[key])
+    return self.primed_unpickler.loads(self.db[key])
 
   def __setitem__(self, key, value):
-    self.db[key] = self.serializer.dumps(value)
-
-  def keys(self):
-    retval = self.db.keys()
-    retval.remove(self.pickler_pair_key)
-    return retval
-
-
-class IndexedDatabase:
-  """A file of objects that are written sequentially and read randomly.
-
-  The objects are indexed by small non-negative integers, and a
-  RecordTable is used to store the index -> fileoffset map.
-  fileoffset=0 is used to represent an empty record.  (An offset of 0
-  cannot occur for a legitimate record because the serializer is
-  written there.)
-
-  The main file consists of a sequence of pickles (or other serialized
-  data format).  The zeroth record is a pickled Serializer.
-  Subsequent ones are objects serialized using the serializer.  The
-  offset of each object in the file is stored to an index table so
-  that the data can later be retrieved randomly.
-
-  Objects are always stored to the end of the file.  If an object is
-  deleted or overwritten, the fact is recorded in the index_table but
-  the space in the pickle file is not garbage collected.  This has the
-  advantage that one can create a modified version of a database that
-  shares the main data file with an old version by copying the index
-  file.  But it has the disadvantage that space is wasted whenever
-  objects are written multiple times."""
-
-  def __init__(self, filename, index_filename, mode, serializer=None):
-    """Initialize an IndexedDatabase, writing the serializer if necessary.
-
-    SERIALIZER is only used if MODE is DB_OPEN_NEW; otherwise the
-    serializer is read from the file."""
-
-    self.mode = mode
-    if self.mode == DB_OPEN_NEW:
-      self.f = open(filename, 'wb+')
-    elif self.mode == DB_OPEN_WRITE:
-      self.f = open(filename, 'rb+')
-    elif self.mode == DB_OPEN_READ:
-      self.f = open(filename, 'rb')
-    else:
-      raise RuntimeError('Invalid mode %r' % self.mode)
-
-    self.index_table = RecordTable(
-        index_filename, self.mode, FileOffsetPacker())
-
-    if self.mode == DB_OPEN_NEW:
-      assert serializer is not None
-      self.serializer = serializer
-      cPickle.dump(self.serializer, self.f, -1)
-    else:
-      # Read the memo from the first pickle:
-      self.serializer = cPickle.load(self.f)
-
-  def __setitem__(self, index, item):
-    """Write ITEM into the database indexed by INDEX."""
-
-    # Make sure we're at the end of the file:
-    self.f.seek(0, 2)
-    self.index_table[index] = self.f.tell()
-    self.serializer.dumpf(self.f, item)
-
-  def _fetch(self, offset):
-    self.f.seek(offset)
-    return self.serializer.loadf(self.f)
-
-  def __iter__(self):
-    for offset in self.index_table:
-      yield self._fetch(offset)
-
-  def __getitem__(self, index):
-    offset = self.index_table[index]
-    return self._fetch(offset)
-
-  def get(self, item, default=None):
-    try:
-      return self[item]
-    except KeyError:
-      return default
-
-  def __delitem__(self, index):
-    self.index_table[index]
-    self.index_table[index] = 0
-
-  def close(self):
-    self.index_table.close()
-    self.f.close()
-
-
-class IndexedStore(IndexedDatabase):
-  """A file of items that is written sequentially and read randomly.
-
-  This is just like IndexedDatabase, except that it has an additional
-  add() method which assumes that the object to be written to the
-  database has an 'id' member, which is used as its database index.
-  See IndexedDatabase for more information."""
-
-  def add(self, item):
-    """Write ITEM into the database indexed by ITEM.id."""
-
-    self[item.id] = item
+    self.db[key] = self.primed_pickler.dumps(value)
 
 

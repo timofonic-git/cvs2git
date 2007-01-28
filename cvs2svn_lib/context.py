@@ -42,7 +42,7 @@ class Ctx:
 
     self.output_option = None
     self.dry_run = False
-    self.revision_reader = None
+    self.use_cvs = False
     self.svnadmin_executable = config.SVNADMIN_EXECUTABLE
     self.co_executable = config.CO_EXECUTABLE
     self.cvs_executable = config.CVS_EXECUTABLE
@@ -59,8 +59,6 @@ class Ctx:
     # A list of Project instances for all projects being converted.
     self.projects = []
     self.cross_project_commits = True
-    self.cross_branch_commits = True
-    self.retain_conflicting_attic_files = False
 
   def add_project(self, project):
     """Add a project to be converted."""

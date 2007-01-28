@@ -18,7 +18,6 @@
 
 
 import time
-import gc
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib import config
@@ -122,30 +121,12 @@ class PassManager:
       artifact_manager.pass_started(the_pass)
       the_pass.run(stats_keeper)
       end_time = time.time()
-      stats_keeper.log_duration_for_pass(
-          end_time - start_time, i + 1, the_pass.name)
+      stats_keeper.log_duration_for_pass(end_time - start_time, i + 1)
       start_time = end_time
       Ctx().clean()
       # Allow the artifact manager to clean up artifacts that are no
       # longer needed:
       artifact_manager.pass_done(the_pass)
-
-      # We've turned off the garbage collector because we shouldn't
-      # need it (we don't create circular dependencies) and because it
-      # is therefore a waste of time.  So here we check for any
-      # unreachable objects and generate a debug-level warning if any
-      # occur:
-      gc.set_debug(gc.DEBUG_SAVEALL)
-      gc_count = gc.collect()
-      if gc_count:
-        if Log().is_on(Log.DEBUG):
-          Log().debug(
-              'INTERNAL: %d unreachable object(s) were garbage collected:'
-              % (gc_count,)
-              )
-          for g in gc.garbage:
-            Log().debug('    %s' % (g,))
-        del gc.garbage[:]
 
     # Tell the artifact manager about passes that are being deferred:
     for the_pass in self.passes[index_end:]:

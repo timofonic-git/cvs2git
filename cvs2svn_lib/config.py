@@ -33,37 +33,11 @@ CO_EXECUTABLE = 'co'
 CVS_EXECUTABLE = 'cvs'
 SORT_EXECUTABLE = 'sort'
 
-# The first file contains enough information about each CVSRevision to
-# deduce preliminary Changesets.  The second file is a sorted version
-# of the first.
-CVS_REVS_SUMMARY_DATAFILE = 'cvs2svn-revs-summary.txt'
-CVS_REVS_SUMMARY_SORTED_DATAFILE = 'cvs2svn-revs-summary-s.txt'
-
-# The first file contains enough information about each CVSSymbol to
-# deduce preliminary Changesets.  The second file is a sorted version
-# of the first.
-CVS_SYMBOLS_SUMMARY_DATAFILE = 'cvs2svn-symbols-summary.txt'
-CVS_SYMBOLS_SUMMARY_SORTED_DATAFILE = 'cvs2svn-symbols-summary-s.txt'
-
-# A mapping from CVSItem id to Changeset id.
-CVS_ITEM_TO_CHANGESET = 'cvs2svn-cvs-item-to-changeset.dat'
-
-# A mapping from CVSItem id to Changeset id, after the
-# RevisionChangeset loops have been broken.
-CVS_ITEM_TO_CHANGESET_REVBROKEN = \
-    'cvs2svn-cvs-item-to-changeset-revbroken.dat'
-
-# A mapping from id to Changeset.
-CHANGESETS_DB = 'cvs2svn-changesets.db'
-
-# A mapping from id to Changeset, after the RevisionChangeset loops
-# have been broken.
-CHANGESETS_REVBROKEN_DB = 'cvs2svn-changesets-revbroken.db'
-
-# The RevisionChangesets in commit order.  Each line contains the
-# changeset id and timestamp of one changeset, in hexadecimal, in the
-# order that the changesets should be committed to svn.
-CHANGESETS_SORTED_DATAFILE = 'cvs2svn-changesets-s.txt'
+# These files are related to the cleaning and sorting of CVS revisions,
+# for commit grouping.  See design-notes.txt for details.
+CVS_REVS_RESYNC_DATAFILE = 'cvs2svn-revs-resync.txt'
+CVS_REVS_SORTED_DATAFILE = 'cvs2svn-revs-resync-s.txt'
+RESYNC_DATAFILE = 'cvs2svn-resync.txt'
 
 # This file contains a marshalled copy of all the statistics that we
 # gather throughout the various runs of cvs2svn.  The data stored as a
@@ -86,41 +60,38 @@ SYMBOL_OPENINGS_CLOSINGS = 'cvs2svn-symbolic-names.txt'
 # A sorted version of the above file.
 SYMBOL_OPENINGS_CLOSINGS_SORTED = 'cvs2svn-symbolic-names-s.txt'
 
-# Skeleton version of an svn filesystem.  See class
-# SVNRepositoryMirror for how these work.
-SVN_MIRROR_REVISIONS_TABLE = 'cvs2svn-svn-revisions.dat'
-SVN_MIRROR_NODES_INDEX_TABLE = 'cvs2svn-svn-nodes-index.dat'
-SVN_MIRROR_NODES_STORE = 'cvs2svn-svn-nodes.pck'
+# Skeleton version of an svn filesystem.
+# (These supersede and will eventually replace the two above.)
+# See class SVNRepositoryMirror for how these work.
+SVN_MIRROR_REVISIONS_DB = 'cvs2svn-svn-revisions.db'
+SVN_MIRROR_NODES_DB = 'cvs2svn-svn-nodes.db'
 
 # Offsets pointing to the beginning of each symbol's records in
 # SYMBOL_OPENINGS_CLOSINGS_SORTED.  This file contains a pickled map
 # from symbol_id to file offset.
 SYMBOL_OFFSETS_DB = 'cvs2svn-symbol-offsets.pck'
 
-# Maps changeset_ids (in hex) to lists of symbol ids, where the
-# changeset is the last such that is a source for those symbols.  For
-# example, if branch B's number is 1.3.0.2 in this CVS file, and this
-# file's 1.3 is the latest (by date) revision among *all* CVS files
-# that is a source for branch B, then the changeset.id for the
-# changeset holding this file at 1.3 would list the symbol id for
-# branch B in its list.
-SYMBOL_LAST_CHANGESETS_DB = 'cvs2svn-symbol-last-changesets.db'
+# Maps CVSRevision.ids (in hex) to lists of symbol ids, where the
+# CVSRevision is the last such that is a source for those symbols.
+# For example, if branch B's number is 1.3.0.2 in this CVS file, and
+# this file's 1.3 is the latest (by date) revision among *all* CVS
+# files that is a source for branch B, then the CVSRevision.id
+# corresponding to this file at 1.3 would list at least the symbol id
+# for branch B in its list.
+SYMBOL_LAST_CVS_REVS_DB = 'cvs2svn-symbol-last-cvs-revs.db'
 
-# Pickled map of CVSFile.id to instance.
-CVS_FILES_DB = 'cvs2svn-cvs-files.pck'
+# Maps CVSFile.id to instance.
+CVS_FILES_DB = 'cvs2svn-cvs-files.db'
 
-# A series of records.  The first is a pickled serializer.  Each
-# subsequent record is a serialized list of all CVSItems applying to a
-# CVSFile.
+# A series of pickles.  The first is a primer.  Each subsequent pickle
+# is lists of all CVSItems applying to a CVSFile.
 CVS_ITEMS_STORE = 'cvs2svn-cvs-items.pck'
 
-# A database of filtered CVSItems.  Excluded symbols have been
-# discarded (and the dependencies of the remaining CVSItems fixed up).
-# These two files are used within an IndexedCVSItemStore; the first is
-# a map id-> offset, and the second contains the pickled CVSItems at
-# the specified offsets.
-CVS_ITEMS_FILTERED_INDEX_TABLE = 'cvs2svn-cvs-items-filtered-index.pck'
-CVS_ITEMS_FILTERED_STORE = 'cvs2svn-cvs-items-filtered.pck'
+# Maps CVSItem.id (in hex) to CVSRevision after resynchronization.
+# The index file contains id->offset, and the second contains the
+# pickled CVSItems at the specified offsets.
+CVS_ITEMS_RESYNC_INDEX_TABLE = 'cvs2svn-cvs-items-resync-index.dat'
+CVS_ITEMS_RESYNC_STORE = 'cvs2svn-cvs-items-resync.pck'
 
 # A record of all symbolic names that will be processed in the
 # conversion.  This file contains a pickled list of TypedSymbol
@@ -134,25 +105,23 @@ SYMBOL_STATISTICS_LIST = 'cvs2svn-symbol-stats.pck'
 # These two databases provide a bidirectional mapping between
 # CVSRevision.ids (in hex) and Subversion revision numbers.
 #
-# The first maps CVSRevision.id to the SVN revision number of which it
-# is a part (more than one CVSRevision can map to the same SVN
-# revision number).
+# The first maps CVSRevision.id to a number; the values are not
+# unique.
 #
 # The second maps Subversion revision numbers (as hex strings) to
 # pickled SVNCommit instances.
-CVS_REVS_TO_SVN_REVNUMS = 'cvs2svn-cvs-revs-to-svn-revnums.dat'
+CVS_REVS_TO_SVN_REVNUMS = 'cvs2svn-cvs-revs-to-svn-revnums.db'
 SVN_COMMITS_DB = 'cvs2svn-svn-commits.db'
 
 # How many bytes to read at a time from a pipe.  128 kiB should be
 # large enough to be efficient without wasting too much memory.
 PIPE_READ_SIZE = 128 * 1024
 
-# Records the author and log message for each changeset.  The database
-# contains a map metadata_id -> (author, logmessage).  Each
-# CVSRevision that is eligible to be combined into the same SVN commit
-# is assigned the same id.  Note that the (author, logmessage) pairs
-# are not necessarily all distinct; other data are taken into account
-# when constructing ids.
+# Records the project.id, author, and log message for each changeset.
+# There are two types of mapping: digest -> metadata_id, and
+# metadata_id -> (projet.id, author, logmessage).  The digests are
+# computed in such a way that CVS commits that are eligible to be
+# combined into the same SVN commit are assigned the same digest.
 METADATA_DB = "cvs2svn-metadata.db"
 
 # If this run's output is a repository, then (in the tmpdir) we use

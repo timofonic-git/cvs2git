@@ -21,8 +21,6 @@
 
 <ul>
 
-  <li><a href="#intro">Introduction</a></li>
-
   <li><a href="#reqs">Requirements</a></li>
 
   <li><a href="#install">Installation</a></li>
@@ -36,97 +34,6 @@
   <li><a href="#examples">A few examples</a></li>
 
 </ul>
-
-<hr />
-
-<h1><a name="intro">Introduction</a></h1>
-
-<p>cvs2svn is a program that can be used to migrate a CVS repository
-to <a href="http://subversion.tigris.org/">Subversion</a> (otherwise
-known as "SVN").  The primary goal of cvs2svn is to migrate as much
-information as possible from your old CVS repository to your new
-Subversion repository.</p>
-
-<p>But unfortunately, CVS doesn't record complete information about
-your project's history.  For example, CVS doesn't record what file
-modifications took place within the same CVS commit.  Therefore,
-cvs2svn attempts to infer from CVS's incomplete information what
-<em>really</em> happened in the history of your repository.  So the
-second goal of cvs2svn is to reconstruct as much of your CVS
-repository's history as possible.</p>
-
-<h2>cvs2svn features</h2>
-
-<dl>
-
-  <dt>No information lost</dt>
-  <dd>cvs2svn works hard to avoid losing any information from your CVS
-    repository (unless you specifically ask for a partial conversion
-    using <tt>--trunk-only</tt> or <tt>--exclude</tt>).</dd>
-
-  <dt>Changesets</dt>
-  <dd>CVS records modifications file-by-file, and does not keep track
-    of what files were modified at the same time.  cvs2svn uses
-    information like the file modification times, log messages, and
-    dependency information to reconstruct the original
-    changesets.</dd>
-
-  <dt>Branch vs. tag</dt>
-  <dd>CVS allows the same symbol name to be used sometimes as a
-    branch, sometimes as a tag.  cvs2svn has heuristics to decide how
-    to convert such "mixed" symbols (<tt>--force-branch</tt>,
-    <tt>--force-tag</tt>, <tt>--symbol-default</tt>).</dd>
-
-  <dt>Branch and tag creation times</dt>
-  <dd>CVS does not record when branches and tags are created.  cvs2svn
-    creates branches and tags at a reasonable time, consistent with
-    the file revisions that were tagged, and tries to create each one
-    within a single Subversion commit if possible.</dd>
-
-  <dt>Mime types</dt>
-  <dd>CVS does not record files' mime types.  cvs2svn provides several
-    mechanisms for choosing reasonable file mime types
-    (<tt>--mime-types</tt>, <tt>--auto-props</tt>).</dd>
-
-  <dt>Binary vs. text</dt>
-  <dd>Many CVS repositories do not systematically record which files
-    are binary and which are text.  (This is mostly important if the
-    repository is used on non-Unix systems.)  cvs2svn provides a
-    number of ways to infer this information
-    (<tt>--eol-from-mime-type</tt>, <tt>--no-default-eol</tt>,
-    <tt>--keywords-off</tt>, <tt>--auto-props</tt>).</dd>
-
-  <dt>Subversion file properties</dt>
-  <dd>Subversion allows arbitrary text properties to be attached to
-    files.  cvs2svn provides a mechanism to set such properties when a
-    file is first added to the repository
-    (<tt>--auto-props</tt>).</dd>
-
-  <dt>Timestamp error correction</dt>
-  <dd>Many CVS repositories contain timestamp errors due to servers'
-    clocks being set incorrectly during part of the repository's
-    history.  cvs2svn's history reconstruction is relatively robust
-    against timestamp errors and it writes monotonic timestamps to the
-    Subversion repository.</dd>
-
-  <dt>Subversion repository customization</dt>
-  <dd>cvs2svn provides many options that allow you to customize the
-    structure of the resulting Subversion repository
-    (<tt>--trunk</tt>, <tt>--branches</tt>, <tt>--tags</tt>,
-    <tt>--no-prune</tt>, <tt>--symbol-transform</tt>, etc.; see also
-    the additional customization options available by using the <a
-    href="#options-file-method"><tt>--options</tt>-file
-    method</a>).</dd>
-
-  <dt>Support for multiple character encodings</dt>
-  <dd>CVS does not record which character encoding was used to store
-    metainformation like file names, author names and log messages.
-    cvs2svn provides options to convert this text into UTF-8 as used
-    by Subversion (<tt>--encoding</tt>,
-    <tt>--fallback-encoding</tt>).</dd>
-
-</dl>
-
 
 <hr />
 
@@ -362,66 +269,16 @@ any changes to your CVS repository, but if you start moving things
 around and deleting things in a CVS repository, it's all too easy to
 shoot yourself in the foot.</p>
 
-<h2>End-of-line translation</h2>
-
-<p>One of the most important topics to consider when converting a
-repository is the distinction between binary and text files.  If you
-accidentally treat a binary file as text <strong>your repository
-contents will be corrupted</strong>.</p>
-
-<p>Text files are handled differently than binary files by both CVS
-and Subversion.  When a text file is checked out, the character used
-to denote the end of line ("EOL") is converted to the local computer's
-format.  This is usually the most convenient behavior for text files.
-Moreover, both CVS and Subversion allow "keywords" in text files (such
-as <tt>$Id$</tt>), which are expanded with version control information
-when the file is checked out.  However, if line-end translation or
-keyword expansion is applied to a binary file, the file will usually
-be corrupted.</p>
-
-<p>By default, CVS treats a file as text unless you specifically tell
-it that the file is binary.  You can tell CVS that a file is binary by
-using the command <tt>cvs admin -kb <i>filename</i></tt>.  But often
-CVS users forget to specify which files are binary, and as long as the
-repository is only used under Unix, they may never notice a problem,
-because the internal format of CVS is the same as the Unix format.</p>
-
-<p>If you have been conscientious about marking files as binary in
-CVS, then cvs2svn shouldn't have any problem.  But if you have been
-sloppy, you need to do something now <strong>or you will have
-problems</strong>.  Subversion is not as forgiving as CVS if you tell
-it to treat a binary file as text.  Your choices are:</p>
-
-<ul>
-
-  <li>Fix your CVS repository <em>before</em> conversion by running
-    <tt>cvs admin -kb <i>filename</i></tt> for each binary file in the
-    repository.</li>
-
-  <li>Use cvs2svn options to let cvs2svn deduce which files are binary
-    <em>during</em> the conversion.  The useful options are
-    <tt>--eol-from-mime-type</tt>, <tt>--no-default-eol</tt>,
-    <tt>--keywords-off</tt>, and <tt>--auto-props</tt>.  See the <a
-    href="faq.html#eol-fixup">FAQ</a> for more information.</li>
-
-</ul>
-
-<h2>Converting part of repository</h2>
-
 <p>If you want to convert a subdirectory in your repository, you can
-just point cvs2svn at the subdirectory and go.  There is no need to
-delete the unwanted directories from the CVS repository.</p>
+just point cvs2svn at the subdirectory and go.</p>
 
-<p>If the subdirectory that you are converting contains any files that
-you <i>don't</i> want converted into your new Subversion repository,
-you should delete them or move them aside.  Such files can be deleted
-from HEAD after the conversion, but they will still be visible in the
-repository history.</p>
+<p>If there are any files that you <i>don't</i> want converted into
+your new Subversion repository, you should delete them or move them
+aside.</p>
 
-<p>Lastly, even though you can move and copy files and directories
-around in Subversion, you may want to do some rearranging of project
-directories before running your conversion to get the desired
-repository project organization.</p>
+Lastly, even though you can move and copy files and directories around
+in Subversion, you may want to do some rearranging (typically of
+directories) before running your conversion.
 
 <hr />
 
@@ -679,20 +536,6 @@ this:</p>
 
       </ul>
     </td>
-  </tr>
-
-  <tr>
-    <td align="right"><tt>--no-cross-branch-commits</tt></td>
-    <td>Prevent the creation of SVN commits that affect multiple
-      branches or trunk and a branch.  Instead, break such changesets
-      into multiple commits, one per branch.</td>
-  </tr>
-
-  <tr>
-    <td align="right"><tt>--retain-conflicting-attic-files</tt></td>
-    <td>If a file appears both inside an outside of the CVS attic,
-      retain the attic version in an SVN subdirectory called `Attic'.
-      (Normally this situation is treated as a fatal error.)</td>
   </tr>
 
   <tr>

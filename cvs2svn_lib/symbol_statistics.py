@@ -45,11 +45,7 @@ class _Stats:
     branch_commit_count -- the number of commits on this branch
 
     branch_blockers -- a set of Symbol instances for any symbols that
-        sprout from a branch with this name.
-
-    possible_parents -- a map {Symbol : count} indicating in how many
-        files each Symbol could have served as the parent of
-        self.symbol.  The count for trunk is stored under key None."""
+        sprout from a branch with this name."""
 
   def __init__(self, symbol):
     self.symbol = symbol
@@ -57,30 +53,6 @@ class _Stats:
     self.branch_create_count = 0
     self.branch_commit_count = 0
     self.branch_blockers = set()
-    self.possible_parents = { }
-
-  def register_tag_creation(self):
-    """Register the creation of this symbol as a tag."""
-
-    self.tag_create_count += 1
-
-  def register_branch_creation(self):
-    """Register the creation of this symbol as a branch."""
-
-    self.branch_create_count += 1
-
-  def register_branch_commit(self):
-    """Register a commit on this symbol as a branch."""
-
-    self.branch_commit_count += 1
-
-  def register_branch_blocker(self, blocker):
-    """Register BLOCKER as a blocker of this symbol as a branch."""
-
-    self.branch_blockers.add(blocker)
-
-  def register_possible_parent(self, symbol):
-    self.possible_parents[symbol] = self.possible_parents.get(symbol, 0) + 1
 
   def __str__(self):
     return (
@@ -88,18 +60,6 @@ class _Stats:
         '%d files and has commits in %d files'
         % (self.symbol, self.tag_create_count,
            self.branch_create_count, self.branch_commit_count))
-
-  def __repr__(self):
-    retval = ['%s; %d possible parents:\n'
-              % (self, len(self.possible_parents))]
-    parent_counts = self.possible_parents.items()
-    parent_counts.sort(lambda a,b: - cmp(a[1], b[1]))
-    for (symbol, count) in parent_counts:
-      if symbol is None:
-        retval.append('    trunk : %d\n' % count)
-      else:
-        retval.append('    \'%s\' : %d\n' % (symbol, count))
-    return ''.join(retval)
 
 
 class SymbolStatisticsCollector:
@@ -123,10 +83,10 @@ class SymbolStatisticsCollector:
     # A map { symbol -> record } for all symbols (branches and tags)
     self._stats = { }
 
-  def __getitem__(self, symbol):
+  def _get_stats(self, symbol):
     """Return the _Stats record for SYMBOL.
 
-    Create and register a new one if necessary."""
+    Create a new one if necessary."""
 
     try:
       return self._stats[symbol]
@@ -134,6 +94,26 @@ class SymbolStatisticsCollector:
       stats = _Stats(symbol)
       self._stats[symbol] = stats
       return stats
+
+  def register_tag_creation(self, symbol):
+    """Register the creation of the tag SYMBOL."""
+
+    self._get_stats(symbol).tag_create_count += 1
+
+  def register_branch_creation(self, symbol):
+    """Register the creation of the branch SYMBOL."""
+
+    self._get_stats(symbol).branch_create_count += 1
+
+  def register_branch_commit(self, symbol):
+    """Register a commit on the branch SYMBOL."""
+
+    self._get_stats(symbol).branch_commit_count += 1
+
+  def register_branch_blocker(self, symbol, blocker):
+    """Register BLOCKER as a blocker on the branch SYMBOL."""
+
+    self._get_stats(symbol).branch_blockers.add(blocker)
 
   def write(self):
     """Store the stats database to the SYMBOL_STATISTICS_LIST file."""

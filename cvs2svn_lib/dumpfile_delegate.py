@@ -27,7 +27,6 @@ from cvs2svn_lib.common import FatalError
 from cvs2svn_lib.common import OP_ADD
 from cvs2svn_lib.common import OP_CHANGE
 from cvs2svn_lib.common import to_utf8
-from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.svn_repository_mirror import SVNRepositoryMirrorDelegate
 
 
@@ -65,8 +64,7 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
       except UnicodeError:
         raise FatalError(
             "Unable to convert a path '%s' to internal encoding.\n"
-            "Consider rerunning with one or more '--encoding' parameters or\n"
-            "with '--fallback-encoding'."
+            "Consider rerunning with one or more '--encoding' parameters."
             % (path,))
     return '/'.join(pieces)
 
@@ -206,25 +204,10 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
       prop_contents = ''
       props_header = ''
 
-    # If the file has keywords, we must prevent CVS/RCS from expanding
-    # the keywords because they must be unexpanded in the repository,
-    # or Subversion will get confused.
-    stream = Ctx().revision_reader.get_content_stream(
-        cvs_rev, suppress_keyword_substitution=s_item.has_keywords())
-
-    # Insert a filter to convert all EOLs to LFs if neccessary
-    if s_item.needs_eol_filter():
-      data_reader = LF_EOL_Filter(stream)
-    else:
-      data_reader = stream
-
-    buf = None
-
     # treat .cvsignore as a directory property
     dir_path, basename = os.path.split(cvs_rev.svn_path)
     if basename == ".cvsignore":
-      buf = data_reader.read()
-      ignore_vals = generate_ignores(buf)
+      ignore_vals = generate_ignores(cvs_rev)
       ignore_contents = '\n'.join(ignore_vals)
       if ignore_contents:
         ignore_contents += '\n'
@@ -244,6 +227,12 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
                           % (self._utf8_path(dir_path), ignore_len,
                              ignore_len, ignore_contents))
 
+    # If the file has keywords, we must prevent CVS/RCS from expanding
+    # the keywords because they must be unexpanded in the repository,
+    # or Subversion will get confused.
+    pipe_cmd, pipe = cvs_rev.cvs_file.project.cvs_repository.get_co_pipe(
+        cvs_rev, suppress_keyword_substitution=s_item.has_keywords)
+
     self.dumpfile.write('Node-path: %s\n'
                         'Node-kind: file\n'
                         'Node-action: %s\n'
@@ -262,18 +251,28 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
     if prop_contents:
       self.dumpfile.write(prop_contents)
 
+    # Insert a filter to convert all EOLs to LFs if neccessary
+    if s_item.needs_eol_filter:
+      data_reader = LF_EOL_Filter(pipe.stdout)
+    else:
+      data_reader = pipe.stdout
+
     # Insert the rev contents, calculating length and checksum as we go.
     checksum = md5.new()
     length = 0
-    if buf is None:
+    while True:
       buf = data_reader.read(config.PIPE_READ_SIZE)
-    while buf != '':
+      if buf == '':
+        break
       checksum.update(buf)
       length += len(buf)
       self.dumpfile.write(buf)
-      buf = data_reader.read(config.PIPE_READ_SIZE)
 
-    stream.close()
+    pipe.stdout.close()
+    error_output = pipe.stderr.read()
+    exit_status = pipe.wait()
+    if exit_status:
+      raise CommandError(pipe_cmd, exit_status, error_output)
 
     # Go back to patch up the length and checksum headers:
     self.dumpfile.seek(pos, 0)
@@ -306,10 +305,6 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
 
     self._add_or_change_path(s_item, OP_CHANGE)
 
-  def skip_path(self, cvs_rev):
-    """Ensure that the unneeded revisions are accounted for as well."""
-    Ctx().revision_reader.skip_content(cvs_rev)
-
   def delete_path(self, path):
     """Emit the deletion of PATH."""
 
@@ -338,15 +333,35 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
     self.dumpfile.close()
 
 
-def generate_ignores(raw_ignore_val):
+def generate_ignores(cvs_rev):
+  # Read in props
+  pipe_cmd, pipe = \
+      cvs_rev.cvs_file.project.cvs_repository.get_co_pipe(cvs_rev)
+  buf = pipe.stdout.read(config.PIPE_READ_SIZE)
+  raw_ignore_val = ""
+  while buf:
+    raw_ignore_val += buf
+    buf = pipe.stdout.read(config.PIPE_READ_SIZE)
+  pipe.stdout.close()
+  error_output = pipe.stderr.read()
+  exit_status = pipe.wait()
+  if exit_status:
+    raise CommandError(pipe_cmd, exit_status, error_output)
+
+  # Tweak props: First, convert any spaces to newlines...
+  raw_ignore_val = '\n'.join(raw_ignore_val.split())
+  raw_ignores = raw_ignore_val.split('\n')
   ignore_vals = [ ]
-  for ignore in raw_ignore_val.split():
+  for ignore in raw_ignores:
     # Reset the list if we encounter a '!'
     # See http://cvsbook.red-bean.com/cvsbook.html#cvsignore
     if ignore == '!':
       ignore_vals = [ ]
-    else:
-      ignore_vals.append(ignore)
+      continue
+    # Skip empty lines
+    if len(ignore) == 0:
+      continue
+    ignore_vals.append(ignore)
   return ignore_vals
 
 
@@ -359,7 +374,7 @@ class LF_EOL_Filter:
     self.carry_cr = False
     self.eof = False
 
-  def read(self, size=-1):
+  def read(self, size):
     while True:
       buf = self.stream.read(size)
       self.eof = len(buf) == 0

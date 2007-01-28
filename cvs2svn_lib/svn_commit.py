@@ -119,8 +119,7 @@ class SVNCommit:
         Log().warn("(subversion rev %s)" % self.revnum)
 
       Log().warn(
-          "Consider rerunning with one or more '--encoding' parameters or\n"
-          "with '--fallback-encoding'.\n")
+          "Consider rerunning with one or more '--encoding' parameters.\n")
       # It's better to fall back to the original (unknown encoding) data
       # than to either 1) quit or 2) record nothing at all.
       return { 'svn:author' : self._author,
@@ -235,10 +234,7 @@ class SVNPrimaryCommit(SVNCommit, SVNRevisionCommit):
                   % (len(self.cvs_revs), plural))
     for cvs_rev in self.cvs_revs:
       if cvs_rev.op == OP_DELETE:
-        # FIXME: This test requires a database lookup.  It should be
-        # possible to avoid it:
-        if repos.path_exists(cvs_rev.svn_path):
-          repos.delete_path(cvs_rev.svn_path, Ctx().prune)
+        repos.delete_path(cvs_rev.svn_path, Ctx().prune)
 
       elif (cvs_rev.rev == "1.1.1.1"
           and not cvs_rev.deltatext_exists
@@ -247,7 +243,7 @@ class SVNPrimaryCommit(SVNCommit, SVNRevisionCommit):
         # CVSCommit._commit() for what this is all about.  Note that
         # although asking repos.path_exists() is somewhat expensive,
         # we only do it if the first two (cheap) tests succeed first.
-        repos.skip_path(cvs_rev)
+        pass
 
       elif cvs_rev.op == OP_ADD:
         repos.add_path(cvs_rev)
@@ -407,11 +403,7 @@ class SVNPostCommit(SVNCommit, SVNRevisionCommit):
       else:
         assert cvs_rev.op == OP_DELETE
         # delete trunk path
-
-        # FIXME: This test requires a database lookup.  It should be
-        # possible to avoid it:
-        if repos.path_exists(svn_trunk_path):
-          repos.delete_path(svn_trunk_path)
+        repos.delete_path(svn_trunk_path)
 
     repos.end_commit()
 

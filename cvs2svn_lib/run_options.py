@@ -40,8 +40,6 @@ from cvs2svn_lib.output_option import NewRepositoryOutputOption
 from cvs2svn_lib.output_option import ExistingRepositoryOutputOption
 from cvs2svn_lib.project import Project
 from cvs2svn_lib.pass_manager import InvalidPassError
-from cvs2svn_lib.revision_reader import RCSRevisionReader
-from cvs2svn_lib.revision_reader import CVSRevisionReader
 from cvs2svn_lib.symbol_strategy import AllBranchRule
 from cvs2svn_lib.symbol_strategy import AllTagRule
 from cvs2svn_lib.symbol_strategy import BranchIfCommitsRule
@@ -53,15 +51,14 @@ from cvs2svn_lib.symbol_strategy import RuleBasedSymbolStrategy
 from cvs2svn_lib.symbol_strategy import UnambiguousUsageRule
 from cvs2svn_lib.symbol_transform import RegexpSymbolTransform
 from cvs2svn_lib.property_setters import AutoPropsPropertySetter
-from cvs2svn_lib.property_setters import CVSBinaryFileDefaultMimeTypeSetter
-from cvs2svn_lib.property_setters import CVSBinaryFileEOLStyleSetter
+from cvs2svn_lib.property_setters import BinaryFileDefaultMimeTypeSetter
+from cvs2svn_lib.property_setters import BinaryFileEOLStyleSetter
 from cvs2svn_lib.property_setters import CVSRevisionNumberSetter
 from cvs2svn_lib.property_setters import DefaultEOLStyleSetter
 from cvs2svn_lib.property_setters import EOLStyleFromMimeTypeSetter
 from cvs2svn_lib.property_setters import ExecutablePropertySetter
 from cvs2svn_lib.property_setters import KeywordsPropertySetter
 from cvs2svn_lib.property_setters import MimeMapper
-from cvs2svn_lib.property_setters import SVNBinaryFileKeywordsPropertySetter
 
 
 usage_message_template = """\
@@ -96,10 +93,6 @@ USAGE: %(progname)s [-v] [-s svn-repos-path] [-p pass] cvs-repos-path
   --exclude=REGEXP     exclude branches and tags matching REGEXP
   --symbol-default=OPT choose how ambiguous symbols are converted.  OPT is
                        "branch", "tag", or "heuristic", or "strict" (default)
-  --no-cross-branch-commits Prevent the creation of cross-branch commits
-  --retain-conflicting-attic-files if a file appears both in and out of the
-                       CVS Attic, then leave the attic version in a SVN
-                       directory called "Attic".
   --symbol-transform=P:S transform symbol names from P to S where P and S
                        use Python regexp and reference syntax respectively
   --username=NAME      username for cvs2svn-synthesized commits
@@ -158,8 +151,6 @@ class RunOptions:
           "no-prune",
           "encoding=", "fallback-encoding=",
           "force-branch=", "force-tag=", "exclude=", "symbol-default=",
-          "no-cross-branch-commits",
-          "retain-conflicting-attic-files",
           "symbol-transform=",
           "username=",
           "fs-type=", "bdb-txn-nosync",
@@ -262,7 +253,6 @@ class RunOptions:
     bdb_txn_nosync = False
     dump_only = False
     dumpfile = None
-    use_cvs = False
     symbol_strategy_default = 'strict'
     mime_types_file = None
     auto_props_file = None
@@ -285,7 +275,7 @@ class RunOptions:
       elif opt == '--dumpfile':
         dumpfile = value
       elif opt == '--use-cvs':
-        use_cvs = True
+        ctx.use_cvs = True
       elif opt == '--trunk-only':
         ctx.trunk_only = True
       elif opt == '--trunk':
@@ -311,16 +301,12 @@ class RunOptions:
           raise FatalError(
               '%r is not a valid option for --symbol_default.' % (value,))
         symbol_strategy_default = value
-      elif opt == '--no-cross-branch-commits':
-        ctx.cross_branch_commits = False
-      elif opt == '--retain-conflicting-attic-files':
-        ctx.retain_conflicting_attic_files = True
       elif opt == '--symbol-transform':
         [pattern, replacement] = value.split(":")
         try:
           symbol_transforms.append(
               RegexpSymbolTransform(pattern, replacement))
-        except re.error:
+        except re.error, e:
           raise FatalError("'%s' is not a valid regexp." % (pattern,))
       elif opt == '--username':
         ctx.username = value
@@ -416,11 +402,6 @@ class RunOptions:
     else:
       ctx.output_option = DumpfileOutputOption(dumpfile)
 
-    if use_cvs:
-      ctx.revision_reader = CVSRevisionReader()
-    else:
-      ctx.revision_reader = RCSRevisionReader()
-
     # Create the default project (using ctx.trunk, ctx.branches, and
     # ctx.tags):
     ctx.add_project(Project(
@@ -440,16 +421,18 @@ class RunOptions:
     else:
       assert False
 
-    if auto_props_file:
-      ctx.svn_property_setters.append(AutoPropsPropertySetter(
-          auto_props_file, auto_props_ignore_case))
+    ctx.svn_property_setters.append(ExecutablePropertySetter())
+
+    ctx.svn_property_setters.append(BinaryFileEOLStyleSetter())
 
     if mime_types_file:
       ctx.svn_property_setters.append(MimeMapper(mime_types_file))
 
-    ctx.svn_property_setters.append(CVSBinaryFileEOLStyleSetter())
+    if auto_props_file:
+      ctx.svn_property_setters.append(AutoPropsPropertySetter(
+          auto_props_file, auto_props_ignore_case))
 
-    ctx.svn_property_setters.append(CVSBinaryFileDefaultMimeTypeSetter())
+    ctx.svn_property_setters.append(BinaryFileDefaultMimeTypeSetter())
 
     if eol_from_mime_type:
       ctx.svn_property_setters.append(EOLStyleFromMimeTypeSetter())
@@ -459,13 +442,9 @@ class RunOptions:
     else:
       ctx.svn_property_setters.append(DefaultEOLStyleSetter('native'))
 
-    ctx.svn_property_setters.append(SVNBinaryFileKeywordsPropertySetter())
-
     if not keywords_off:
       ctx.svn_property_setters.append(
           KeywordsPropertySetter(config.SVN_KEYWORDS_VALUE))
-
-    ctx.svn_property_setters.append(ExecutablePropertySetter())
 
   def check_options(self):
     """Check the the run options are OK.
