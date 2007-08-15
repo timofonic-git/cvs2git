@@ -41,24 +41,13 @@ from cvs2svn_lib.changeset import OrderedChangeset
 from cvs2svn_lib.changeset import BranchChangeset
 from cvs2svn_lib.changeset import TagChangeset
 from cvs2svn_lib.svn_commit import SVNCommit
-from cvs2svn_lib.svn_commit import SVNInitialProjectCommit
 from cvs2svn_lib.svn_commit import SVNPrimaryCommit
+from cvs2svn_lib.svn_commit import SVNSymbolCommit
 from cvs2svn_lib.svn_commit import SVNPostCommit
-from cvs2svn_lib.svn_commit import SVNBranchCommit
-from cvs2svn_lib.svn_commit import SVNTagCommit
-from cvs2svn_lib.key_generator import KeyGenerator
 
 
 class SVNCommitCreator:
   """This class creates and yields SVNCommits via process_changeset()."""
-
-  def __init__(self):
-    # The revision number to assign to the next new SVNCommit.
-    self.revnum_generator = KeyGenerator(1)
-
-    # A set containing the Projects that have already been
-    # initialized:
-    self._initialized_projects = set()
 
   def _post_commit(self, cvs_revs, motivating_revnum, timestamp):
     """Generate any SVNCommits needed to follow CVS_REVS.
@@ -72,7 +61,8 @@ class SVNCommitCreator:
     cvs_revs = [
           cvs_rev
           for cvs_rev in cvs_revs
-          if cvs_rev.ntdbr and not isinstance(cvs_rev, CVSRevisionNoop)
+          if (cvs_rev.default_branch_revision
+              and not isinstance(cvs_rev, CVSRevisionNoop))
           ]
 
     if cvs_revs:
@@ -80,10 +70,7 @@ class SVNCommitCreator:
           lambda a, b: cmp(a.cvs_file.filename, b.cvs_file.filename)
           )
       # Generate an SVNCommit for all of our default branch cvs_revs.
-      yield SVNPostCommit(
-          motivating_revnum, cvs_revs, timestamp,
-          self.revnum_generator.gen_id(),
-          )
+      yield SVNPostCommit(motivating_revnum, cvs_revs, timestamp)
 
   def _process_revision_changeset(self, changeset, timestamp):
     """Process CHANGESET, using TIMESTAMP as the commit time.
@@ -110,9 +97,7 @@ class SVNCommitCreator:
     cvs_revs = list(changeset.get_cvs_items())
     if cvs_revs:
       cvs_revs.sort(lambda a, b: cmp(a.cvs_file.filename, b.cvs_file.filename))
-      svn_commit = SVNPrimaryCommit(
-          cvs_revs, timestamp, self.revnum_generator.gen_id()
-          )
+      svn_commit = SVNPrimaryCommit(cvs_revs, timestamp)
 
       yield svn_commit
 
@@ -134,10 +119,10 @@ class SVNCommitCreator:
         yield svn_post_commit
 
   def _process_tag_changeset(self, changeset, timestamp):
-    """Process TagChangeset CHANGESET, producing a SVNTagCommit.
+    """Process TagChangeset CHANGESET, producing a SVNSymbolCommit.
 
     Filter out CVSTagNoops.  If no CVSTags are left, don't generate a
-    SVNTagCommit."""
+    SVNSymbolCommit."""
 
     if Ctx().trunk_only:
       raise InternalError(
@@ -149,20 +134,17 @@ class SVNCommitCreator:
         if not isinstance(cvs_tag, CVSTagNoop)
         ]
     if cvs_tag_ids:
-      yield SVNTagCommit(
-          changeset.symbol, cvs_tag_ids, timestamp,
-          self.revnum_generator.gen_id(),
-          )
+      yield SVNSymbolCommit(changeset.symbol, cvs_tag_ids, timestamp)
     else:
       Log().debug(
           'Omitting %r because it contains only CVSTagNoops' % (changeset,)
           )
 
   def _process_branch_changeset(self, changeset, timestamp):
-    """Process BranchChangeset CHANGESET, producing a SVNBranchCommit.
+    """Process BranchChangeset CHANGESET, producing a SVNSymbolCommit.
 
     Filter out CVSBranchNoops.  If no CVSBranches are left, don't
-    generate a SVNBranchCommit."""
+    generate a SVNSymbolCommit."""
 
     if Ctx().trunk_only:
       raise InternalError(
@@ -174,11 +156,10 @@ class SVNCommitCreator:
         if not isinstance(cvs_branch, CVSBranchNoop)
         ]
     if cvs_branches:
-      svn_commit = SVNBranchCommit(
+      svn_commit = SVNSymbolCommit(
           changeset.symbol,
           [cvs_branch.id for cvs_branch in cvs_branches],
           timestamp,
-          self.revnum_generator.gen_id(),
           )
       yield svn_commit
       for cvs_branch in cvs_branches:
@@ -198,32 +179,12 @@ class SVNCommitCreator:
     The changesets must be fed to this function in proper dependency
     order."""
 
-    # First create any new projects that might be opened by the
-    # changeset:
-    projects_opened = \
-        changeset.get_projects_opened() - self._initialized_projects
-    if projects_opened:
-      if Ctx().cross_project_commits:
-        yield SVNInitialProjectCommit(
-            timestamp, projects_opened, self.revnum_generator.gen_id()
-            )
-      else:
-        for project in projects_opened:
-          yield SVNInitialProjectCommit(
-              timestamp, [project], self.revnum_generator.gen_id()
-              )
-      self._initialized_projects.update(projects_opened)
-
     if isinstance(changeset, OrderedChangeset):
-      for svn_commit \
-              in self._process_revision_changeset(changeset, timestamp):
-        yield svn_commit
+      return self._process_revision_changeset(changeset, timestamp)
     elif isinstance(changeset, TagChangeset):
-      for svn_commit in self._process_tag_changeset(changeset, timestamp):
-        yield svn_commit
+      return self._process_tag_changeset(changeset, timestamp)
     elif isinstance(changeset, BranchChangeset):
-      for svn_commit in self._process_branch_changeset(changeset, timestamp):
-        yield svn_commit
+      return self._process_branch_changeset(changeset, timestamp)
     else:
       raise TypeError('Illegal changeset %r' % changeset)
 

@@ -85,36 +85,27 @@ class Log:
     return self.log_level >= level
 
   def _timestamp(self):
-    """Return a timestamp if needed, as a string with a trailing space."""
+    """Return a timestamp if needed."""
 
     retval = []
 
     if self.log_level >= Log.DEBUG:
-      retval.append('%f: ' % (time.time() - self.start_time,))
+      retval.append('%f:' % (time.time() - self.start_time,))
 
     if self.use_timestamps:
-      retval.append(time.strftime('[%Y-%m-%d %I:%M:%S %Z] - '))
+      retval.append(time.strftime('[%Y-%m-%d %I:%M:%S %Z] -'))
 
-    return ''.join(retval)
+    return retval
 
   def write(self, *args):
     """Write a message to the log.
 
     This is the public method to use for writing to a file.  If there
-    are multiple ARGS, they will be separated by spaces.  If there are
-    multiple lines, they will be output one by one with the same
-    timestamp prefix."""
-
-    timestamp = self._timestamp()
-    s = ' '.join(map(str, args))
-    lines = s.split('\n')
-    if lines and not lines[-1]:
-      del lines[-1]
+    are multiple ARGS, they will be separated by spaces."""
 
     self.lock.acquire()
     try:
-      for s in lines:
-        self.logger.write('%s%s\n' % (timestamp, s,))
+      self.logger.write(' '.join(self._timestamp() + map(str, args)) + "\n")
       # Ensure that log output doesn't get out-of-order with respect to
       # stderr output.
       self.logger.flush()

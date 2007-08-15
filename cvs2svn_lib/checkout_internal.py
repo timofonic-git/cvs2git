@@ -105,16 +105,15 @@ from cvs2svn_lib.common import InternalError
 from cvs2svn_lib.log import Log
 from cvs2svn_lib.artifact_manager import artifact_manager
 from cvs2svn_lib.symbol import Symbol
-from cvs2svn_lib.symbol import Trunk
 from cvs2svn_lib.cvs_item import CVSRevisionModification
 from cvs2svn_lib.cvs_item import CVSRevisionDelete
 from cvs2svn_lib.collect_data import is_trunk_revision
 from cvs2svn_lib.database import Database
 from cvs2svn_lib.database import IndexedDatabase
 from cvs2svn_lib.rcs_stream import RCSStream
-from cvs2svn_lib.revision_manager import RevisionRecorder
-from cvs2svn_lib.revision_manager import RevisionExcluder
-from cvs2svn_lib.revision_manager import RevisionReader
+from cvs2svn_lib.revision_recorder import RevisionRecorder
+from cvs2svn_lib.revision_excluder import RevisionExcluder
+from cvs2svn_lib.revision_reader import RevisionReader
 from cvs2svn_lib.serializer import StringSerializer
 from cvs2svn_lib.serializer import CompressingSerializer
 from cvs2svn_lib.serializer import PrimedPickleSerializer
@@ -452,14 +451,10 @@ class InternalRevisionRecorder(RevisionRecorder):
     self._compress = compress
 
   def register_artifacts(self, which_pass):
-    artifact_manager.register_temp_file(
-        config.RCS_DELTAS_INDEX_TABLE, which_pass
-        )
-    artifact_manager.register_temp_file(config.RCS_DELTAS_STORE, which_pass)
-    artifact_manager.register_temp_file(
-        config.RCS_TREES_INDEX_TABLE, which_pass
-        )
-    artifact_manager.register_temp_file(config.RCS_TREES_STORE, which_pass)
+    which_pass._register_temp_file(config.RCS_DELTAS_INDEX_TABLE)
+    which_pass._register_temp_file(config.RCS_DELTAS_STORE)
+    which_pass._register_temp_file(config.RCS_TREES_INDEX_TABLE)
+    which_pass._register_temp_file(config.RCS_TREES_STORE)
 
   def start(self):
     ser = StringSerializer()
@@ -475,14 +470,15 @@ class InternalRevisionRecorder(RevisionRecorder):
         artifact_manager.get_temp_file(config.RCS_TREES_INDEX_TABLE),
         DB_OPEN_NEW, PrimedPickleSerializer(primer))
 
-  def start_file(self, cvs_file_items):
-    self._cvs_file_items = cvs_file_items
+  def start_file(self, cvs_file):
+    self._cvs_file = cvs_file
 
     # A map from cvs_rev_id to TextRecord instance:
     self.text_record_db = TextRecordDatabase(self._rcs_deltas, NullDatabase())
 
-  def record_text(self, cvs_rev, log, text):
-    if isinstance(cvs_rev.lod, Trunk):
+  def record_text(self, revisions_data, revision, log, text):
+    revision_data = revisions_data[revision]
+    if is_trunk_revision(revision):
       # On trunk, revisions are encountered in reverse order (1.<N>
       # ... 1.1) and deltas are inverted.  The first text that we see
       # is the fulltext for the HEAD revision.  After that, the text
@@ -496,7 +492,7 @@ class InternalRevisionRecorder(RevisionRecorder):
       # because it doesn't have a parent), we can record the diff (1.1
       # -> 1.2) for revision 1.2, and also the fulltext for 1.1.
 
-      if cvs_rev.next_id is None:
+      if revision_data.child is None:
         # This is HEAD, as fulltext.  Initialize the RCSStream so
         # that we can compute deltas backwards in time.
         self._stream = RCSStream(text)
@@ -506,12 +502,15 @@ class InternalRevisionRecorder(RevisionRecorder):
         # revision, and also to get the reverse delta, which we store
         # as the forward delta of our child revision.
         text = self._stream.invert_diff(text)
-        text_record = DeltaTextRecord(cvs_rev.next_id, cvs_rev.id)
+        text_record = DeltaTextRecord(
+            revisions_data[revision_data.child].cvs_rev_id,
+            revision_data.cvs_rev_id
+            )
         self._writeout(text_record, text)
 
-      if cvs_rev.prev_id is None:
+      if revision_data.parent is None:
         # This is revision 1.1.  Write its fulltext:
-        text_record = FullTextRecord(cvs_rev.id)
+        text_record = FullTextRecord(revision_data.cvs_rev_id)
         self._writeout(text_record, self._stream.get_text())
 
         # There will be no more trunk revisions delivered, so free the
@@ -528,7 +527,10 @@ class InternalRevisionRecorder(RevisionRecorder):
       # when --trunk-only.  (They will be deleted when finish_file()
       # is called, but if the delta db is in an IndexedDatabase the
       # deletions won't actually recover any disk space.)
-      text_record = DeltaTextRecord(cvs_rev.id, cvs_rev.prev_id)
+      text_record = DeltaTextRecord(
+          revision_data.cvs_rev_id,
+          revisions_data[revision_data.parent].cvs_rev_id
+          )
       self._writeout(text_record, text)
 
     return None
@@ -544,12 +546,10 @@ class InternalRevisionRecorder(RevisionRecorder):
     that are unneeded, and store the text records for the file to the
     _rcs_trees database."""
 
-    # Delete our copy of the preliminary CVSFileItems:
-    del self._cvs_file_items
-
     self.text_record_db.recompute_refcounts(cvs_file_items)
     self.text_record_db.free_unused()
-    self._rcs_trees[cvs_file_items.cvs_file.id] = self.text_record_db
+    self._rcs_trees[self._cvs_file.id] = self.text_record_db
+    del self._cvs_file
     del self.text_record_db
 
   def finish(self):
@@ -561,18 +561,10 @@ class InternalRevisionExcluder(RevisionExcluder):
   """The RevisionExcluder used by InternalRevisionReader."""
 
   def register_artifacts(self, which_pass):
-    artifact_manager.register_temp_file_needed(
-        config.RCS_TREES_STORE, which_pass
-        )
-    artifact_manager.register_temp_file_needed(
-        config.RCS_TREES_INDEX_TABLE, which_pass
-        )
-    artifact_manager.register_temp_file(
-        config.RCS_TREES_FILTERED_STORE, which_pass
-        )
-    artifact_manager.register_temp_file(
-        config.RCS_TREES_FILTERED_INDEX_TABLE, which_pass
-        )
+    which_pass._register_temp_file_needed(config.RCS_TREES_STORE)
+    which_pass._register_temp_file_needed(config.RCS_TREES_INDEX_TABLE)
+    which_pass._register_temp_file(config.RCS_TREES_FILTERED_STORE)
+    which_pass._register_temp_file(config.RCS_TREES_FILTERED_INDEX_TABLE)
 
   def start(self):
     self._tree_db = IndexedDatabase(
@@ -591,6 +583,10 @@ class InternalRevisionExcluder(RevisionExcluder):
     text_record_db.free_unused()
     self._new_tree_db[cvs_file_items.cvs_file.id] = text_record_db
 
+  def skip_file(self, cvs_file):
+    text_record_db = self._tree_db[cvs_file.id]
+    self._new_tree_db[cvs_file.id] = text_record_db
+
   def finish(self):
     self._tree_db.close()
     self._new_tree_db.close()
@@ -608,19 +604,18 @@ class InternalRevisionReader(RevisionReader):
     self._compress = compress
 
   def register_artifacts(self, which_pass):
-    artifact_manager.register_temp_file(config.CVS_CHECKOUT_DB, which_pass)
-    artifact_manager.register_temp_file_needed(
-        config.RCS_DELTAS_STORE, which_pass
-        )
-    artifact_manager.register_temp_file_needed(
-        config.RCS_DELTAS_INDEX_TABLE, which_pass
-        )
-    artifact_manager.register_temp_file_needed(
-        config.RCS_TREES_FILTERED_STORE, which_pass
-        )
-    artifact_manager.register_temp_file_needed(
-        config.RCS_TREES_FILTERED_INDEX_TABLE, which_pass
-        )
+    which_pass._register_temp_file(config.CVS_CHECKOUT_DB)
+    which_pass._register_temp_file_needed(config.RCS_DELTAS_STORE)
+    which_pass._register_temp_file_needed(config.RCS_DELTAS_INDEX_TABLE)
+    which_pass._register_temp_file_needed(config.RCS_TREES_FILTERED_STORE)
+    which_pass._register_temp_file_needed(
+        config.RCS_TREES_FILTERED_INDEX_TABLE)
+
+  def get_revision_recorder(self):
+    return InternalRevisionRecorder(self._compress)
+
+  def get_revision_excluder(self):
+    return InternalRevisionExcluder()
 
   def start(self):
     self._delta_db = IndexedDatabase(
@@ -679,6 +674,9 @@ class InternalRevisionReader(RevisionReader):
       text = re.sub(self._kw_re, r'$\1$', text)
 
     return cStringIO.StringIO(text)
+
+  def skip_content(self, cvs_rev):
+    self._get_text_record(cvs_rev).decrement_refcount(self._text_record_db)
 
   def finish(self):
     self._text_record_db.log_leftovers()

@@ -63,7 +63,10 @@ from cvs2svn_lib.svn_commit import SVNCommit
 from cvs2svn_lib.svn_commit import SVNRevisionCommit
 from cvs2svn_lib.openings_closings import SymbolingsLogger
 from cvs2svn_lib.svn_commit_creator import SVNCommitCreator
+from cvs2svn_lib.svn_repository_mirror import SVNRepositoryMirror
+from cvs2svn_lib.svn_commit import SVNInitialProjectCommit
 from cvs2svn_lib.persistence_manager import PersistenceManager
+from cvs2svn_lib.stdout_delegate import StdoutDelegate
 from cvs2svn_lib.collect_data import CollectData
 from cvs2svn_lib.process import run_command
 from cvs2svn_lib.check_dependencies_pass \
@@ -111,12 +114,13 @@ class CollectRevsPass(Pass):
     self._register_temp_file(config.METADATA_DB)
     self._register_temp_file(config.CVS_FILES_DB)
     self._register_temp_file(config.CVS_ITEMS_STORE)
-    Ctx().revision_recorder.register_artifacts(self)
+    Ctx().revision_reader.get_revision_recorder().register_artifacts(self)
 
   def run(self, stats_keeper):
     Log().quiet("Examining all CVS ',v' files...")
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_NEW)
-    cd = CollectData(Ctx().revision_recorder, stats_keeper)
+    cd = CollectData(
+        Ctx().revision_reader.get_revision_recorder(), stats_keeper)
     for project in Ctx().projects:
       cd.process_project(project)
 
@@ -194,7 +198,7 @@ class FilterSymbolsPass(Pass):
     self._register_temp_file_needed(config.SYMBOL_DB)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_STORE)
-    Ctx().revision_excluder.register_artifacts(self)
+    Ctx().revision_reader.get_revision_excluder().register_artifacts(self)
 
   def run(self, stats_keeper):
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
@@ -212,7 +216,7 @@ class FilterSymbolsPass(Pass):
         artifact_manager.get_temp_file(config.CVS_SYMBOLS_SUMMARY_DATAFILE),
         'w')
 
-    revision_excluder = Ctx().revision_excluder
+    revision_excluder = Ctx().revision_reader.get_revision_excluder()
 
     Log().quiet("Filtering out excluded symbols and summarizing items...")
 
@@ -227,7 +231,7 @@ class FilterSymbolsPass(Pass):
       cvs_file_items.record_closed_symbols()
 
       if Log().is_on(Log.DEBUG):
-        cvs_file_items.check_link_consistency()
+        cvs_file_items.check_symbol_parent_lods()
 
       # Store whatever is left to the new file:
       for cvs_item in cvs_file_items.values():
@@ -1260,9 +1264,10 @@ class CreateRevsPass(Pass):
 
     changeset_db.close()
 
-  def get_svn_commits(self, creator):
+  def get_svn_commits(self):
     """Generate the SVNCommits, in order."""
 
+    creator = SVNCommitCreator()
     for (changeset, timestamp) in self.get_changesets():
       for svn_commit in creator.process_changeset(changeset, timestamp):
         yield svn_commit
@@ -1270,10 +1275,8 @@ class CreateRevsPass(Pass):
   def log_svn_commit(self, svn_commit):
     """Output information about SVN_COMMIT."""
 
-    Log().normal(
-        'Creating Subversion r%d (%s)'
-        % (svn_commit.revnum, svn_commit.get_description(),)
-        )
+    Log().normal("Creating Subversion r%d (%s)"
+                 % (svn_commit.revnum, svn_commit.description))
 
     if isinstance(svn_commit, SVNRevisionCommit):
       for cvs_rev in svn_commit.cvs_revs:
@@ -1294,13 +1297,9 @@ class CreateRevsPass(Pass):
 
     persistence_manager = PersistenceManager(DB_OPEN_NEW)
 
-    creator = SVNCommitCreator()
-    for svn_commit in self.get_svn_commits(creator):
+    for svn_commit in self.get_svn_commits():
       self.log_svn_commit(svn_commit)
       persistence_manager.put_svn_commit(svn_commit)
-
-    stats_keeper.set_svn_rev_count(creator.revnum_generator.get_last_id())
-    del creator
 
     persistence_manager.close()
     Ctx()._symbolings_logger.close()
@@ -1309,6 +1308,7 @@ class CreateRevsPass(Pass):
     Ctx()._symbol_db.close()
     Ctx()._cvs_file_db.close()
 
+    stats_keeper.set_svn_rev_count(SVNCommit.revnum - 1)
     stats_keeper.archive()
 
     Log().quiet("Done")
@@ -1386,6 +1386,9 @@ class OutputPass(Pass):
   """This pass was formerly known as pass8."""
 
   def register_artifacts(self):
+    self._register_temp_file(config.SVN_MIRROR_REVISIONS_TABLE)
+    self._register_temp_file(config.SVN_MIRROR_NODES_INDEX_TABLE)
+    self._register_temp_file(config.SVN_MIRROR_NODES_STORE)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_SORTED_STORE)
     self._register_temp_file_needed(config.CVS_ITEMS_SORTED_INDEX_TABLE)
@@ -1394,18 +1397,24 @@ class OutputPass(Pass):
     self._register_temp_file_needed(config.SVN_COMMITS_INDEX_TABLE)
     self._register_temp_file_needed(config.SVN_COMMITS_STORE)
     self._register_temp_file_needed(config.CVS_REVS_TO_SVN_REVNUMS)
-    Ctx().output_option.register_artifacts(self)
+    self._register_temp_file_needed(config.SYMBOL_OPENINGS_CLOSINGS_SORTED)
+    self._register_temp_file_needed(config.SYMBOL_OFFSETS_DB)
+    Ctx().revision_reader.register_artifacts(self)
 
   def get_svn_commits(self):
     """Generate the SVNCommits in commit order."""
 
     persistence_manager = PersistenceManager(DB_OPEN_READ)
 
-    svn_revnum = 1 # The first non-trivial commit
+    svn_revnum = 2 # The first non-trivial commit
 
     # Peek at the first revision to find the date to use to initialize
     # the repository:
     svn_commit = persistence_manager.get_svn_commit(svn_revnum)
+
+    # Initialize the repository by creating the directories for trunk,
+    # tags, and branches.
+    yield SVNInitialProjectCommit(svn_commit.date, 1)
 
     while svn_commit:
       yield svn_commit
@@ -1422,14 +1431,22 @@ class OutputPass(Pass):
         artifact_manager.get_temp_file(config.CVS_ITEMS_SORTED_INDEX_TABLE),
         DB_OPEN_READ)
     Ctx()._symbol_db = SymbolDatabase()
+    repos = SVNRepositoryMirror()
 
-    Ctx().output_option.setup(stats_keeper.svn_rev_count())
+    Ctx().output_option.setup(repos)
+
+    repos.add_delegate(StdoutDelegate(stats_keeper.svn_rev_count()))
+
+    Ctx().revision_reader.start()
 
     for svn_commit in self.get_svn_commits():
-      svn_commit.output(Ctx().output_option)
+      svn_commit.commit(repos)
+
+    repos.close()
+
+    Ctx().revision_reader.finish()
 
     Ctx().output_option.cleanup()
-
     Ctx()._symbol_db.close()
     Ctx()._cvs_items_db.close()
     Ctx()._metadata_db.close()

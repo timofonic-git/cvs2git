@@ -32,6 +32,7 @@ from cvs2svn_lib.serializer import MarshalSerializer
 from cvs2svn_lib.database import IndexedDatabase
 from cvs2svn_lib.record_table import UnsignedIntegerPacker
 from cvs2svn_lib.record_table import RecordTable
+from cvs2svn_lib.openings_closings import SymbolingsReader
 from cvs2svn_lib.svn_commit_item import SVNCommitItem
 
 
@@ -132,34 +133,21 @@ class SVNRepositoryMirror:
   *** WARNING *** Path arguments to methods in this class MUST NOT
       have leading or trailing slashes."""
 
-  class ParentMissingError(Exception):
+  class SVNRepositoryMirrorParentMissingError(Exception):
     """Exception raised if an attempt is made to add a path to the
     repository mirror but the parent's path doesn't exist in the
     youngest revision of the repository."""
 
     pass
 
-  class PathExistsError(Exception):
+  class SVNRepositoryMirrorPathExistsError(Exception):
     """Exception raised if an attempt is made to add a path to the
     repository mirror and that path already exists in the youngest
     revision of the repository."""
 
     pass
 
-  def register_artifacts(self, which_pass):
-    """Register the artifacts that will be needed for this object."""
-
-    artifact_manager.register_temp_file(
-        config.SVN_MIRROR_REVISIONS_TABLE, which_pass
-        )
-    artifact_manager.register_temp_file(
-        config.SVN_MIRROR_NODES_INDEX_TABLE, which_pass
-        )
-    artifact_manager.register_temp_file(
-        config.SVN_MIRROR_NODES_STORE, which_pass
-        )
-
-  def open(self):
+  def __init__(self):
     """Set up the SVNRepositoryMirror and prepare it for SVNCommits."""
 
     self._key_generator = KeyGenerator()
@@ -182,6 +170,8 @@ class SVNRepositoryMirror:
     # Start at revision 0 without a root node.  It will be created
     # by _open_writable_root_node.
     self._youngest = 0
+
+    self._symbolings_reader = SymbolingsReader()
 
   def start_commit(self, revnum, revprops):
     """Start a new commit."""
@@ -370,17 +360,17 @@ class SVNRepositoryMirror:
     (parent_path, component,) = path_split(cvs_rev.get_svn_path())
     parent_node = self._open_writable_node(parent_path, True)
 
-    if component in parent_node:
-      raise self.PathExistsError(
-          'Attempt to add path \'%s\' to repository mirror '
-          'when it already exists in the mirror.'
-          % (cvs_rev.get_svn_path(),)
-          )
+    assert component not in parent_node
 
     parent_node[component] = \
         self._create_node(path_join(parent_node.path, component))
 
     self._invoke_delegates('add_path', SVNCommitItem(cvs_rev, True))
+
+  def skip_path(self, cvs_rev):
+    """This does nothing, except for allowing the delegate to handle
+    skipped revisions symmetrically."""
+    self._invoke_delegates('skip_path', cvs_rev)
 
   def copy_path(self, src_path, dest_path, src_revnum, create_parent=False):
     """Copy SRC_PATH at subversion revision number SRC_REVNUM to DEST_PATH.
@@ -400,14 +390,13 @@ class SVNRepositoryMirror:
     dest_parent_node = self._open_writable_node(dest_parent, create_parent)
 
     if dest_parent_node is None:
-      raise self.ParentMissingError(
+      raise self.SVNRepositoryMirrorParentMissingError(
           "Attempt to add path '%s' to repository mirror, "
           "but its parent directory doesn't exist in the mirror." % dest_path)
     elif dest_basename in dest_parent_node:
-      raise self.PathExistsError(
+      raise self.SVNRepositoryMirrorPathExistsError(
           "Attempt to add path '%s' to repository mirror "
-          "when it already exists in the mirror." % dest_path
-          )
+          "when it already exists in the mirror." % dest_path)
 
     dest_parent_node[dest_basename] = src_node
     self._invoke_delegates('copy_path', src_path, dest_path, src_revnum)
@@ -417,7 +406,7 @@ class SVNRepositoryMirror:
     # node again so that its path is correct.
     return dest_parent_node[dest_basename]
 
-  def fill_symbol(self, svn_symbol_commit, source_set):
+  def fill_symbol(self, svn_symbol_commit):
     """Perform all copies necessary to create as much of the the tag
     or branch SYMBOL as possible given the current revision of the
     repository mirror.  SYMBOL is an instance of TypedSymbol.
@@ -427,6 +416,11 @@ class SVNRepositoryMirror:
     under it."""
 
     symbol = svn_symbol_commit.symbol
+
+    # Get the set of sources for the symbolic name:
+    source_set = self._symbolings_reader.get_source_set(
+        svn_symbol_commit, self._youngest
+        )
 
     if not source_set:
       raise InternalError(
@@ -592,6 +586,12 @@ class SVNRepositoryMirrorDelegate:
 
   def change_path(self, s_item):
     """S_ITEM is an SVNCommitItem; see subclass implementation for
+    details."""
+
+    raise NotImplementedError
+
+  def skip_path(self, cvs_rev):
+    """CVS_REV is a CVSRevision; see subclass implementation for
     details."""
 
     raise NotImplementedError

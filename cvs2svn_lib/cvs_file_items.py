@@ -43,12 +43,6 @@ from cvs2svn_lib.cvs_item import cvs_branch_type_map
 from cvs2svn_lib.cvs_item import cvs_tag_type_map
 
 
-class VendorBranchError(Exception):
-  """There is an error in the structure of the file revision tree."""
-
-  pass
-
-
 class LODItems(object):
   def __init__(self, lod, cvs_branch, cvs_revisions, cvs_branches, cvs_tags):
     # The LineOfDevelopment described by this instance.
@@ -68,19 +62,6 @@ class LODItems(object):
     # A list of CVSTags that sprout from this LOD (either from
     # cvs_branch or from one of the CVSRevisions).
     self.cvs_tags = cvs_tags
-
-  def is_pure_ntdb(self):
-    """Return True iff this LOD is a pure NTDB in this file.
-
-    A pure non-trunk default branch is defined to be a branch that
-    contains only NTDB revisions (and at least one of them).  Such
-    branches are eligible for being grafted onto trunk, even if it has
-    branch blockers."""
-
-    return (
-        self.cvs_revisions
-        and self.cvs_revisions[-1].ntdbr
-        )
 
 
 class CVSFileItems(object):
@@ -121,86 +102,12 @@ class CVSFileItems(object):
 
     return self._cvs_items[id]
 
-  def get(self, id, default=None):
-    return self._cvs_items.get(id, default)
-
   def __delitem__(self, id):
     assert id not in self.root_ids
     del self._cvs_items[id]
 
   def values(self):
     return self._cvs_items.values()
-
-  def check_link_consistency(self):
-    """Check that the CVSItems are linked correctly with each other."""
-
-    for cvs_item in self.values():
-      try:
-        cvs_item.check_links(self)
-      except AssertionError:
-        Log().warn('Link consistency error in %s\n' % (cvs_item,))
-        raise
-
-  def _get_lod(self, lod, cvs_branch, start_id):
-    """Return the indicated LODItems.
-
-    LOD is the corresponding LineOfDevelopment.  CVS_BRANCH is the
-    CVSBranch instance that starts the LOD if any; otherwise it is
-    None.  START_ID is the id of the first CVSRevision on this LOD, or
-    None if there are none."""
-
-    cvs_revisions = []
-    cvs_branches = []
-    cvs_tags = []
-
-    def process_subitems(cvs_item):
-      """Process the branches and tags that are rooted in CVS_ITEM.
-
-      CVS_ITEM can be a CVSRevision or a CVSBranch."""
-
-      for branch_id in cvs_item.branch_ids[:]:
-        cvs_branches.append(self[branch_id])
-
-      for tag_id in cvs_item.tag_ids:
-        cvs_tags.append(self[tag_id])
-
-    if cvs_branch is not None:
-      # Include the symbols sprouting directly from the CVSBranch:
-      process_subitems(cvs_branch)
-
-    id = start_id
-    while id is not None:
-      cvs_rev = self[id]
-      cvs_revisions.append(cvs_rev)
-      process_subitems(cvs_rev)
-      id = cvs_rev.next_id
-
-    return LODItems(lod, cvs_branch, cvs_revisions, cvs_branches, cvs_tags)
-
-  def get_lod_items(self, cvs_branch):
-    """Return an LODItems describing the branch that starts at CVS_BRANCH.
-
-    CVS_BRANCH must be an instance of CVSBranch contained in this
-    CVSFileItems."""
-
-    return self._get_lod(cvs_branch.symbol, cvs_branch, cvs_branch.next_id)
-
-  def iter_root_lods(self):
-    """Iterate over the LODItems for all root LODs (non-recursively)."""
-
-    for id in list(self.root_ids):
-      cvs_item = self[id]
-      if isinstance(cvs_item, CVSRevision):
-        # This LOD doesn't have a CVSBranch associated with it.
-        # Either it is Trunk, or it is a branch whose CVSBranch has
-        # been deleted.
-        yield self._get_lod(cvs_item.lod, None, id)
-      elif isinstance(cvs_item, CVSBranch):
-        # This is a Branch that has been severed from the rest of the
-        # tree.
-        yield self._get_lod(cvs_item.symbol, cvs_item, cvs_item.next_id)
-      else:
-        raise InternalError('Unexpected root item: %s' % (cvs_item,))
 
   def _iter_tree(self, lod, cvs_branch, start_id):
     """Iterate over the tree that starts at the specified line of development.
@@ -296,64 +203,14 @@ class CVSFileItems(object):
       for lod_items in self._iter_tree(lod, cvs_branch, id):
         yield lod_items
 
-  def _sever_branch(self, lod_items):
-    """Sever the branch from its source and discard the CVSBranch.
+  def adjust_ntdbrs(self, file_imported, ntdbr_ids, rev_1_2_id):
+    """Adjust the non-trunk default branch revisions listed in NTDBR_IDS.
 
-    LOD_ITEMS describes a branch that should be severed from its
-    source, deleting the CVSBranch and creating a new root.  Also set
-    LOD_ITEMS.cvs_branch to none.
-
-    This method can only be used before symbols have been grafted onto
-    CVSBranches.  It does not adjust NTDBR, NTDBR_PREV_ID or
-    NTDBR_NEXT_ID even if LOD_ITEMS describes a NTDB."""
-
-    cvs_branch = lod_items.cvs_branch
-    assert cvs_branch is not None
-    assert not cvs_branch.tag_ids
-    assert not cvs_branch.branch_ids
-    source_rev = self[cvs_branch.source_id]
-
-    # We only cover the following case, even though after
-    # FilterSymbolsPass cvs_branch.source_id might refer to another
-    # CVSBranch.
-    assert isinstance(source_rev, CVSRevision)
-
-    # Delete the CVSBranch itself:
-    lod_items.cvs_branch = None
-    del self[cvs_branch.id]
-
-    # Delete the reference from the source revision to the CVSBranch:
-    source_rev.branch_ids.remove(cvs_branch.id)
-
-    # Delete the reference from the first revision on the branch to
-    # the CVSBranch:
-    if lod_items.cvs_revisions:
-      first_rev = lod_items.cvs_revisions[0]
-
-      # Delete the reference from first_rev to the CVSBranch:
-      first_rev.first_on_branch_id = None
-
-      # Delete the reference from the source revision to the first
-      # revision on the branch:
-      source_rev.branch_commit_ids.remove(first_rev.id)
-
-      # ...and vice versa:
-      first_rev.prev_id = None
-
-      # Change the type of first_rev (e.g., from Change to Add):
-      first_rev.__class__ = cvs_revision_type_map[
-          (isinstance(first_rev, CVSRevisionModification), False,)
-          ]
-
-      # Now first_rev is a new root:
-      self.root_ids.add(first_rev.id)
-
-  def adjust_ntdbrs(self, ntdbr_cvs_revs):
-    """Adjust the specified non-trunk default branch revisions.
-
-    NTDBR_CVS_REVS is a list of CVSRevision instances in this file
-    that have been determined to be non-trunk default branch
-    revisions.
+    FILE_IMPORTED is a boolean indicating whether this file appears to
+    have been imported, which also means that revision 1.1 has a
+    generated log message that need not be preserved.  NTDBR_IDS is a
+    list of cvs_rev_ids for the revisions that have been determined to
+    be non-trunk default branch revisions.
 
     The first revision on the default branch is handled strangely by
     CVS.  If a file is imported (as opposed to being added), CVS
@@ -379,131 +236,45 @@ class CVSFileItems(object):
     such revisions to the vendor branch, we also copy them back to
     trunk in post-commits.
 
-    Set the ntdbr members of the revisions listed in NTDBR_CVS_REVS to
-    True.  Also, if there is a 1.2 revision, then set that revision to
-    depend on the last non-trunk default branch revision and possibly
-    adjust its type accordingly."""
+    Set the default_branch_revision members of the revisions listed in
+    NTDBR_IDS to True.  Also, if REV_1_2_ID is not None, then it is
+    the id of revision 1.2.  Set that revision to depend on the last
+    non-trunk default branch revision and possibly adjust its type
+    accordingly."""
 
-    for cvs_rev in ntdbr_cvs_revs:
-      cvs_rev.ntdbr = True
+    cvs_rev = self[ntdbr_ids[0]]
 
-    # Look for a 1.2 revision:
-    rev_1_1 = self[ntdbr_cvs_revs[0].prev_id]
-
-    rev_1_2 = self.get(rev_1_1.next_id)
-    if rev_1_2 is not None:
-      # Revision 1.2 logically follows the imported revisions, not
-      # 1.1.  Accordingly, connect it to the last NTDBR and possibly
-      # change its type.
-      last_ntdbr = ntdbr_cvs_revs[-1]
-      rev_1_2.ntdbr_prev_id = last_ntdbr.id
-      last_ntdbr.ntdbr_next_id = rev_1_2.id
-      rev_1_2.__class__ = cvs_revision_type_map[(
-          isinstance(rev_1_2, CVSRevisionModification),
-          isinstance(last_ntdbr, CVSRevisionModification),
-          )]
-
-  def process_live_ntdb(self, vendor_lod_items):
-    """VENDOR_LOD_ITEMS is a live default branch; process it.
-
-    In this case, all revisions on the default branch are NTDBRs and
-    it is an error if there is also a '1.2' revision.
-
-    Return True iff this transformation really does something.  Raise
-    a VendorBranchError if there is a '1.2' revision."""
-
-    rev_1_1 = self[vendor_lod_items.cvs_branch.source_id]
-    rev_1_2_id = rev_1_1.next_id
-    if rev_1_2_id is not None:
-      raise VendorBranchError(
-          'File has default branch=%s but also a revision %s'
-          % (vendor_lod_items.cvs_branch.branch_number, self[rev_1_2_id].rev,)
-          )
-
-    ntdbr_cvs_revs = list(vendor_lod_items.cvs_revisions)
-
-    if ntdbr_cvs_revs:
-      self.adjust_ntdbrs(ntdbr_cvs_revs)
-      return True
-    else:
-      return False
-
-  def process_historical_ntdb(self, vendor_lod_items):
-    """There appears to have been a non-trunk default branch in the past.
-
-    There is currently no default branch, but the branch described by
-    file appears to have been imported.  So our educated guess is that
-    all revisions on the '1.1.1' branch (described by
-    VENDOR_LOD_ITEMS) with timestamps prior to the timestamp of '1.2'
-    were non-trunk default branch revisions.
-
-    Return True iff this transformation really does something.
-
-    This really only handles standard '1.1.1.*'-style vendor
-    revisions.  One could conceivably have a file whose default branch
-    is 1.1.3 or whatever, or was that at some point in time, with
-    vendor revisions 1.1.3.1, 1.1.3.2, etc.  But with the default
-    branch gone now, we'd have no basis for assuming that the
-    non-standard vendor branch had ever been the default branch
-    anyway.
-
-    Note that we rely on comparisons between the timestamps of the
-    revisions on the vendor branch and that of revision 1.2, even
-    though the timestamps might be incorrect due to clock skew.  We
-    could do a slightly better job if we used the changeset
-    timestamps, as it is possible that the dependencies that went into
-    determining those timestamps are more accurate.  But that would
-    require an extra pass or two."""
-
-    rev_1_1 = self[vendor_lod_items.cvs_branch.source_id]
-    rev_1_2_id = rev_1_1.next_id
-
-    if rev_1_2_id is None:
-      rev_1_2_timestamp = None
-    else:
-      rev_1_2_timestamp = self[rev_1_2_id].timestamp
-
-    ntdbr_cvs_revs = []
-    for cvs_rev in vendor_lod_items.cvs_revisions:
-      if rev_1_2_timestamp is not None \
-             and cvs_rev.timestamp >= rev_1_2_timestamp:
-        # That's the end of the once-default branch.
-        break
-      ntdbr_cvs_revs.append(cvs_rev)
-
-    if ntdbr_cvs_revs:
-      self.adjust_ntdbrs(ntdbr_cvs_revs)
-      return True
-    else:
-      return False
-
-  def imported_remove_1_1(self, vendor_lod_items):
-    """This file was imported.  Remove the 1.1 revision if possible.
-
-    VENDOR_LOD_ITEMS is the LODItems instance for the vendor branch.
-    See adjust_ntdbrs() for more information."""
-
-    assert vendor_lod_items.cvs_revisions
-    cvs_rev = vendor_lod_items.cvs_revisions[0]
-
-    if isinstance(cvs_rev, CVSRevisionModification) \
+    if file_imported \
+           and cvs_rev.rev == '1.1.1.1' \
+           and isinstance(cvs_rev, CVSRevisionModification) \
            and not cvs_rev.deltatext_exists:
-      cvs_branch = vendor_lod_items.cvs_branch
-      rev_1_1 = self[cvs_branch.source_id]
-      assert isinstance(rev_1_1, CVSRevision)
+      rev_1_1 = self[cvs_rev.prev_id]
       Log().debug('Removing unnecessary revision %s' % (rev_1_1,))
-
-      # Delete the 1.1.1 CVSBranch and sever the vendor branch from trunk:
-      self._sever_branch(vendor_lod_items)
 
       # Delete rev_1_1:
       self.root_ids.remove(rev_1_1.id)
       del self[rev_1_1.id]
-      rev_1_2_id = rev_1_1.next_id
+      cvs_rev.prev_id = None
       if rev_1_2_id is not None:
         rev_1_2 = self[rev_1_2_id]
         rev_1_2.prev_id = None
         self.root_ids.add(rev_1_2.id)
+
+      # Delete the 1.1.1 CVSBranch:
+      assert cvs_rev.first_on_branch_id is not None
+      cvs_branch = self[cvs_rev.first_on_branch_id]
+      if cvs_branch.source_id == rev_1_1.id:
+        del self[cvs_branch.id]
+        rev_1_1.branch_ids.remove(cvs_branch.id)
+        rev_1_1.branch_commit_ids.remove(cvs_rev.id)
+        cvs_rev.first_on_branch_id = None
+        self.root_ids.add(cvs_rev.id)
+
+      # Change the type of cvs_rev (typically from Change to Add):
+      cvs_rev.__class__ = cvs_revision_type_map[(
+          isinstance(cvs_rev, CVSRevisionModification),
+          False,
+          )]
 
       # Move any tags and branches from rev_1_1 to cvs_rev:
       cvs_rev.tag_ids.extend(rev_1_1.tag_ids)
@@ -521,6 +292,23 @@ class CVSFileItems(object):
         cvs_rev2 = self[id]
         cvs_rev2.prev_id = cvs_rev.id
 
+    for cvs_rev_id in ntdbr_ids:
+      cvs_rev = self[cvs_rev_id]
+      cvs_rev.default_branch_revision = True
+
+    if rev_1_2_id is not None:
+      # Revision 1.2 logically follows the imported revisions, not
+      # 1.1.  Accordingly, connect it to the last NTDBR and possibly
+      # change its type.
+      rev_1_2 = self[rev_1_2_id]
+      last_ntdbr = self[ntdbr_ids[-1]]
+      rev_1_2.default_branch_prev_id = last_ntdbr.id
+      last_ntdbr.default_branch_next_id = rev_1_2.id
+      rev_1_2.__class__ = cvs_revision_type_map[(
+          isinstance(rev_1_2, CVSRevisionModification),
+          isinstance(last_ntdbr, CVSRevisionModification),
+          )]
+
   def _delete_unneeded(self, cvs_item, metadata_db):
     if isinstance(cvs_item, CVSRevisionNoop) \
            and cvs_item.rev == '1.1' \
@@ -528,7 +316,7 @@ class CVSFileItems(object):
            and len(cvs_item.branch_ids) >= 1 \
            and self[cvs_item.branch_ids[0]].next_id is not None \
            and not cvs_item.closed_symbols \
-           and not cvs_item.ntdbr:
+           and not cvs_item.default_branch_revision:
       # FIXME: This message will not match if the RCS file was renamed
       # manually after it was created.
       author, log_msg = metadata_db[cvs_item.metadata_id]
@@ -651,13 +439,13 @@ class CVSFileItems(object):
     (Do not update the LOD_ITEMS instance itself.)
 
     If the LOD starts with non-trunk default branch revisions, leave
-    the branch and the NTDB revisions in place, but delete any
-    subsequent revisions that are not NTDB revisions.  In this case,
-    return True; otherwise return False"""
+    them in place and do not delete the branch.  In this case, return
+    True; otherwise return False"""
 
-    if lod_items.cvs_revisions and lod_items.cvs_revisions[0].ntdbr:
+    if lod_items.cvs_revisions \
+           and lod_items.cvs_revisions[0].default_branch_revision:
       for cvs_rev in lod_items.cvs_revisions:
-        if not cvs_rev.ntdbr:
+        if not cvs_rev.default_branch_revision:
           # We've found the first non-NTDBR, and it's stored in cvs_rev:
           break
       else:
@@ -699,53 +487,48 @@ class CVSFileItems(object):
 
         for cvs_rev in lod_items.cvs_revisions:
           del self[cvs_rev.id]
+          # If cvs_rev is the last default revision on a non-trunk
+          # default branch followed by a 1.2 revision, then the 1.2
+          # revision depends on this one.  FIXME: It is questionable
+          # whether this handling is correct, since the non-trunk
+          # default branch revisions affect trunk and should therefore
+          # not just be discarded even if --trunk-only.
+          if cvs_rev.default_branch_next_id is not None:
+            next = self[cvs_rev.default_branch_next_id]
+            assert next.default_branch_prev_id == cvs_rev.id
+            next.default_branch_prev_id = None
+            if next.prev_id is None:
+              self.root_ids.add(next.id)
 
       return False
 
   def graft_ntdbr_to_trunk(self):
     """Graft the non-trunk default branch revisions to trunk.
 
-    They should already be alone on a branch that may or may not have
-    a CVSBranch connecting it to trunk."""
+    They should already be alone on a CVSBranch-less branch."""
 
+    ntdbr_lod_items = None
     for lod_items in self.iter_lods():
-      if lod_items.cvs_revisions and lod_items.cvs_revisions[0].ntdbr:
-        assert lod_items.is_pure_ntdb()
+      if lod_items.cvs_revisions \
+             and lod_items.cvs_revisions[0].default_branch_revision:
+        assert lod_items.cvs_branch is None
+        assert not lod_items.cvs_branches
+        assert not lod_items.cvs_tags
 
-        first_rev = lod_items.cvs_revisions[0]
         last_rev = lod_items.cvs_revisions[-1]
-        rev_1_1 = self.get(first_rev.prev_id)
-        rev_1_2 = self.get(last_rev.ntdbr_next_id)
 
-        if lod_items.cvs_branch is not None:
-          self._sever_branch(lod_items)
-
-        if rev_1_1 is not None:
-          rev_1_1.next_id = first_rev.id
-          first_rev.prev_id = rev_1_1.id
-
-          self.root_ids.remove(first_rev.id)
-
-          first_rev.__class__ = cvs_revision_type_map[(
-              isinstance(first_rev, CVSRevisionModification),
-              isinstance(rev_1_1, CVSRevisionModification),
-              )]
-
-        if rev_1_2 is not None:
-          rev_1_2.ntdbr_prev_id = None
-          last_rev.ntdbr_next_id = None
-
-          if rev_1_2.prev_id is None:
-            self.root_ids.remove(rev_1_2.id)
-
+        if last_rev.default_branch_next_id is not None:
+          rev_1_2 = self[last_rev.default_branch_next_id]
+          rev_1_2.default_branch_prev_id = None
           rev_1_2.prev_id = last_rev.id
+          self.root_ids.remove(rev_1_2.id)
+          last_rev.default_branch_next_id = None
           last_rev.next_id = rev_1_2.id
-
-          # The effective_pred_id of rev_1_2 was not changed, so we
-          # don't have to change rev_1_2's type.
+          # The type of rev_1_2 was already adjusted in
+          # adjust_ntdbrs(), so we don't have to change its type here.
 
         for cvs_rev in lod_items.cvs_revisions:
-          cvs_rev.ntdbr = False
+          cvs_rev.default_branch_revision = False
           cvs_rev.lod = self.trunk
 
         for cvs_branch in lod_items.cvs_branches:
@@ -765,9 +548,10 @@ class CVSFileItems(object):
         self._exclude_tag(cvs_tag)
         lod_items.cvs_tags.remove(cvs_tag)
 
-      if not isinstance(lod_items.lod, Trunk):
-        assert not lod_items.cvs_branches
+      assert not lod_items.cvs_branches
+      assert not lod_items.cvs_tags
 
+      if not isinstance(lod_items.lod, Trunk):
         ntdbr_excluded |= self._exclude_branch(lod_items)
 
     if ntdbr_excluded:
@@ -779,11 +563,14 @@ class CVSFileItems(object):
     Call the revision_excluder's callback methods to let it know what
     is being excluded."""
 
+    revision_excluder_started = False
     ntdbr_excluded = False
     for lod_items in self.iter_lods():
       # Delete any excluded tags:
       for cvs_tag in lod_items.cvs_tags[:]:
         if isinstance(cvs_tag.symbol, ExcludedSymbol):
+          revision_excluder_started = True
+
           self._exclude_tag(cvs_tag)
 
           lod_items.cvs_tags.remove(cvs_tag)
@@ -796,12 +583,17 @@ class CVSFileItems(object):
         assert not lod_items.cvs_branches
         assert not lod_items.cvs_tags
 
+        revision_excluder_started = True
+
         ntdbr_excluded |= self._exclude_branch(lod_items)
 
     if ntdbr_excluded:
       self.graft_ntdbr_to_trunk()
 
-    revision_excluder.process_file(self)
+    if revision_excluder_started:
+      revision_excluder.process_file(self)
+    else:
+      revision_excluder.skip_file(self.cvs_file)
 
   def _mutate_branch_to_tag(self, cvs_branch):
     """Mutate the branch CVS_BRANCH into a tag."""
@@ -812,9 +604,7 @@ class CVSFileItems(object):
       raise FatalError('Attempt to exclude a branch with commits.')
     cvs_tag = CVSTag(
         cvs_branch.id, cvs_branch.cvs_file, cvs_branch.symbol,
-        cvs_branch.source_lod, cvs_branch.source_id,
-        cvs_branch.revision_recorder_token,
-        )
+        cvs_branch.source_lod, cvs_branch.source_id)
     self.add(cvs_tag)
     cvs_revision = self[cvs_tag.source_id]
     cvs_revision.branch_ids.remove(cvs_tag.id)
@@ -825,9 +615,7 @@ class CVSFileItems(object):
 
     cvs_branch = CVSBranch(
         cvs_tag.id, cvs_tag.cvs_file, cvs_tag.symbol,
-        None, cvs_tag.source_lod, cvs_tag.source_id, None,
-        cvs_tag.revision_recorder_token,
-        )
+        None, cvs_tag.source_lod, cvs_tag.source_id, None)
     self.add(cvs_branch)
     cvs_revision = self[cvs_branch.source_id]
     cvs_revision.tag_ids.remove(cvs_branch.id)
@@ -1017,5 +805,22 @@ class CVSFileItems(object):
         for cvs_item_closed_id in cvs_item.get_ids_closed():
           cvs_item_closed = self[cvs_item_closed_id]
           cvs_item.closed_symbols.extend(cvs_item_closed.opened_symbols)
+
+  def check_symbol_parent_lods(self):
+    """Do a consistency check that CVSSymbol.source_lod is set correctly."""
+
+    for cvs_item in self.values():
+      if isinstance(cvs_item, CVSSymbol):
+        source = self[cvs_item.source_id]
+        if isinstance(source, CVSRevision):
+          source_lod = source.lod
+        else:
+          source_lod = source.symbol
+
+        if cvs_item.source_lod != source_lod:
+          raise FatalError(
+              'source_lod discrepancy for %r: %s != %s'
+              % (cvs_item, cvs_item.source_lod, source_lod,)
+              )
 
 

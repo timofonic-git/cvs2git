@@ -28,17 +28,15 @@ from cvs2svn_lib.common import OP_ADD
 from cvs2svn_lib.common import OP_CHANGE
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.svn_repository_mirror import SVNRepositoryMirrorDelegate
-from cvs2svn_lib.apple_single_filter import get_maybe_apple_single_stream
 
 
 class DumpfileDelegate(SVNRepositoryMirrorDelegate):
   """Create a Subversion dumpfile."""
 
-  def __init__(self, revision_reader, dumpfile_path):
+  def __init__(self, dumpfile_path):
     """Return a new DumpfileDelegate instance, attached to a dumpfile
     DUMPFILE_PATH, using Ctx().filename_utf8_encoder()."""
 
-    self._revision_reader = revision_reader
     self.dumpfile_path = dumpfile_path
 
     self.dumpfile = open(self.dumpfile_path, 'wb')
@@ -210,25 +208,21 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
     # If the file has keywords, we must prevent CVS/RCS from expanding
     # the keywords because they must be unexpanded in the repository,
     # or Subversion will get confused.
-    stream = self._revision_reader.get_content_stream(
-        cvs_rev, suppress_keyword_substitution=s_item.has_keywords()
-        )
-
-    if Ctx().decode_apple_single:
-      # Insert a filter to decode any files that are in AppleSingle
-      # format:
-      stream = get_maybe_apple_single_stream(stream)
+    stream = Ctx().revision_reader.get_content_stream(
+        cvs_rev, suppress_keyword_substitution=s_item.has_keywords())
 
     # Insert a filter to convert all EOLs to LFs if neccessary
     if s_item.needs_eol_filter():
-      stream = LF_EOL_Filter(stream)
+      data_reader = LF_EOL_Filter(stream)
+    else:
+      data_reader = stream
 
     buf = None
 
     # treat .cvsignore as a directory property
     dir_path, basename = os.path.split(cvs_rev.get_svn_path())
     if basename == ".cvsignore":
-      buf = stream.read()
+      buf = data_reader.read()
       ignore_vals = generate_ignores(buf)
       ignore_contents = '\n'.join(ignore_vals)
       if ignore_contents:
@@ -271,12 +265,12 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
     checksum = md5.new()
     length = 0
     if buf is None:
-      buf = stream.read(config.PIPE_READ_SIZE)
+      buf = data_reader.read(config.PIPE_READ_SIZE)
     while buf != '':
       checksum.update(buf)
       length += len(buf)
       self.dumpfile.write(buf)
-      buf = stream.read(config.PIPE_READ_SIZE)
+      buf = data_reader.read(config.PIPE_READ_SIZE)
 
     stream.close()
 
@@ -310,6 +304,10 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
     """Emit the change corresponding to S_ITEM, an SVNCommitItem."""
 
     self._add_or_change_path(s_item, OP_CHANGE)
+
+  def skip_path(self, cvs_rev):
+    """Ensure that the unneeded revisions are accounted for as well."""
+    Ctx().revision_reader.skip_content(cvs_rev)
 
   def delete_path(self, path):
     """Emit the deletion of PATH."""
@@ -374,9 +372,5 @@ class LF_EOL_Filter:
       buf = buf.replace('\r', '\n')
       if buf or self.eof:
         return buf
-
-  def close(self):
-    self.stream.close()
-    self.stream = None
 
 
