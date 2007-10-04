@@ -23,6 +23,7 @@ import sys
 import os
 import shutil
 import cPickle
+import bisect
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib.set_support import *
@@ -40,15 +41,9 @@ from cvs2svn_lib.pass_manager import Pass
 from cvs2svn_lib.artifact_manager import artifact_manager
 from cvs2svn_lib.cvs_file_database import CVSFileDatabase
 from cvs2svn_lib.metadata_database import MetadataDatabase
-from cvs2svn_lib.symbol import Trunk
-from cvs2svn_lib.symbol import Symbol
-from cvs2svn_lib.symbol import Branch
-from cvs2svn_lib.symbol import Tag
 from cvs2svn_lib.symbol import ExcludedSymbol
 from cvs2svn_lib.symbol_database import SymbolDatabase
 from cvs2svn_lib.symbol_database import create_symbol_database
-from cvs2svn_lib.symbol_statistics import SymbolPlanException
-from cvs2svn_lib.symbol_statistics import IndeterminateSymbolException
 from cvs2svn_lib.symbol_statistics import SymbolStatistics
 from cvs2svn_lib.cvs_item import CVSRevision
 from cvs2svn_lib.cvs_item import CVSSymbol
@@ -68,7 +63,10 @@ from cvs2svn_lib.svn_commit import SVNCommit
 from cvs2svn_lib.svn_commit import SVNRevisionCommit
 from cvs2svn_lib.openings_closings import SymbolingsLogger
 from cvs2svn_lib.svn_commit_creator import SVNCommitCreator
+from cvs2svn_lib.svn_repository_mirror import SVNRepositoryMirror
+from cvs2svn_lib.svn_commit import SVNInitialProjectCommit
 from cvs2svn_lib.persistence_manager import PersistenceManager
+from cvs2svn_lib.stdout_delegate import StdoutDelegate
 from cvs2svn_lib.collect_data import CollectData
 from cvs2svn_lib.process import run_command
 from cvs2svn_lib.check_dependencies_pass \
@@ -108,36 +106,23 @@ def sort_file(infilename, outfilename, options=''):
     raise FatalError('Command failed: "%s"' % (command,))
 
 
-def read_projects(filename):
-  retval = {}
-  for project in cPickle.load(open(filename, 'rb')):
-    retval[project.id] = project
-  return retval
-
-
-def write_projects(filename):
-  cPickle.dump(Ctx()._projects.values(), open(filename, 'wb'), -1)
-
-
 class CollectRevsPass(Pass):
   """This pass was formerly known as pass1."""
 
   def register_artifacts(self):
-    self._register_temp_file(config.PROJECTS)
     self._register_temp_file(config.SYMBOL_STATISTICS)
     self._register_temp_file(config.METADATA_DB)
     self._register_temp_file(config.CVS_FILES_DB)
     self._register_temp_file(config.CVS_ITEMS_STORE)
-    Ctx().revision_recorder.register_artifacts(self)
+    Ctx().revision_reader.get_revision_recorder().register_artifacts(self)
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     Log().quiet("Examining all CVS ',v' files...")
-    Ctx()._projects = {}
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_NEW)
-    cd = CollectData(Ctx().revision_recorder, stats_keeper)
-    for project in run_options.projects:
+    cd = CollectData(
+        Ctx().revision_reader.get_revision_recorder(), stats_keeper)
+    for project in Ctx().projects:
       cd.process_project(project)
-    run_options.projects = None
 
     fatal_errors = cd.close()
 
@@ -146,152 +131,53 @@ class CollectRevsPass(Pass):
                            + "=" * 75 + "\n"
                            + "Error summary:\n"
                            + "\n".join(fatal_errors) + "\n"
-                           + "Exited due to fatal error(s).")
+                           + "Exited due to fatal error(s).\n")
 
     Ctx()._cvs_file_db.close()
-    write_projects(artifact_manager.get_temp_file(config.PROJECTS))
+    stats_keeper.reset_cvs_rev_info()
+    stats_keeper.archive()
     Log().quiet("Done")
 
 
 class CollateSymbolsPass(Pass):
   """Divide symbols into branches, tags, and excludes."""
 
-  conversion_names = {
-      Branch : 'branch',
-      Tag : 'tag',
-      ExcludedSymbol : 'excluded',
-      Symbol : '.',
-      }
-
   def register_artifacts(self):
     self._register_temp_file(config.SYMBOL_DB)
-    self._register_temp_file_needed(config.PROJECTS)
     self._register_temp_file_needed(config.SYMBOL_STATISTICS)
 
-  def get_symbol(self, stats):
-    """Use StrategyRules to decide what to do with a symbol.
-
-    STATS is an instance of symbol_statistics._Stats describing a
-    Symbol (i.e., not a Trunk instance).  To determine how the symbol
-    is to be converted, consult the StrategyRules in
-    Ctx().symbol_strategy_rules.  Each rule is allowed a chance to
-    change the way the symbol will be converted.  If the symbol is not
-    a TypedSymbol after all rules have run, raise
-    IndeterminateSymbolException."""
-
-    symbol = stats.lod
-    for rule in Ctx().symbol_strategy_rules:
-      symbol = rule.get_symbol(symbol, stats)
-      assert symbol is not None
-
-    stats.check_consistency(symbol)
-
-    return symbol
-
-  def log_symbol_summary(self, stats, symbol):
-    if self.symbol_info_file:
-      if symbol.preferred_parent_id is None:
-        preferred_parent_name = '.'
-      else:
-        preferred_parent = Ctx()._symbol_stats[symbol.preferred_parent_id].lod
-        if isinstance(preferred_parent, Trunk):
-          preferred_parent_name = '.trunk.'
-        else:
-          preferred_parent_name = preferred_parent.name
-      self.symbol_info_file.write(
-          '%-5d %-30s %-10s %s\n'
-          % (stats.lod.project.id, stats.lod.name,
-             self.conversion_names[symbol.__class__], preferred_parent_name)
-          )
-      self.symbol_info_file.write('      # %s\n' % (stats,))
-      self.symbol_info_file.write('      # Possible parents:\n')
-      parent_counts = stats.possible_parents.items()
-      parent_counts.sort(lambda a,b: cmp((b[1], a[0]), (a[1], b[0])))
-      for (pp, count) in parent_counts:
-        if isinstance(pp, Trunk):
-          self.symbol_info_file.write(
-              '      #     .trunk. : %d\n' % (count,)
-              )
-        else:
-          self.symbol_info_file.write(
-              '      #     %s : %d\n' % (pp.name, count,)
-              )
-
-  def get_symbols(self):
-    """Return a list of TypedSymbol objects telling how to convert symbols.
-
-    The return value is a list of TypedSymbol objects (Branch, Tag, or
-    ExcludedSymbol), indicating how each symbol should be converted.
-    Trunk objects in SYMBOL_STATS are passed through unchanged.  One
-    object must be included in the return value for each line of
-    development described in SYMBOL_STATS.
-
-    Raise FatalError if there was an error."""
-
-    errors = []
-    mismatches = []
-
-    if Ctx().symbol_info_filename is not None:
-      self.symbol_info_file = open(Ctx().symbol_info_filename, 'w')
-      self.symbol_info_file.write(
-          '# Columns: project_id symbol_name conversion preferred_parent\n'
-          )
-    else:
-      self.symbol_info_file = None
-
-    for stats in Ctx()._symbol_stats:
-      if isinstance(stats.lod, Trunk):
-        yield stats.lod
-      else:
-        try:
-          symbol = self.get_symbol(stats)
-        except IndeterminateSymbolException, e:
-          self.log_symbol_summary(stats, stats.lod)
-          mismatches.append(e.stats)
-        except SymbolPlanException, e:
-          self.log_symbol_summary(stats, stats.lod)
-          errors.append(e)
-        else:
-          self.log_symbol_summary(stats, symbol)
-          yield symbol
-
-    if self.symbol_info_file:
-      self.symbol_info_file.close()
-
-    del self.symbol_info_file
-
-    if errors or mismatches:
-      s = ['Problems determining how symbols should be converted:\n']
-      for e in errors:
-        s.append('%s\n' % (e,))
-      if mismatches:
-        s.append(
-            'It is not clear how the following symbols '
-            'should be converted.\n'
-            'Use --symbol-hints, --force-tag, --force-branch, --exclude, '
-            'and/or\n'
-            '--symbol-default to resolve the ambiguity.\n'
-            )
-        for stats in mismatches:
-          s.append('    %s\n' % (stats,))
-      raise FatalError(''.join(s))
-
-  def run(self, run_options, stats_keeper):
-    Ctx()._projects = read_projects(
-        artifact_manager.get_temp_file(config.PROJECTS)
-        )
-    Ctx()._symbol_stats = SymbolStatistics(
+  def run(self, stats_keeper):
+    symbol_stats = SymbolStatistics(
         artifact_manager.get_temp_file(config.SYMBOL_STATISTICS)
         )
 
-    symbols = list(self.get_symbols())
+    symbols = Ctx().symbol_strategy.get_symbols(symbol_stats)
 
     # Check the symbols for consistency and bail out if there were errors:
-    Ctx()._symbol_stats.check_consistency(symbols)
+    if symbols is None or symbol_stats.check_consistency(symbols):
+      sys.exit(1)
 
     for symbol in symbols:
       if isinstance(symbol, ExcludedSymbol):
-        Ctx()._symbol_stats.exclude_symbol(symbol)
+        symbol_stats.exclude_symbol(symbol)
+
+    preferred_parents = symbol_stats.get_preferred_parents()
+
+    for symbol in symbols:
+      if symbol in preferred_parents:
+        preferred_parent = preferred_parents[symbol]
+        del preferred_parents[symbol]
+        if preferred_parent is None:
+          symbol.preferred_parent_id = None
+          Log().debug('%s has no preferred parent' % (symbol,))
+        else:
+          symbol.preferred_parent_id = preferred_parent.id
+          Log().debug(
+              'The preferred parent of %s is %s' % (symbol, preferred_parent,)
+              )
+
+    if preferred_parents:
+      raise InternalError('Some symbols unaccounted for')
 
     create_symbol_database(symbols)
 
@@ -309,16 +195,12 @@ class FilterSymbolsPass(Pass):
     self._register_temp_file(config.CVS_ITEMS_FILTERED_INDEX_TABLE)
     self._register_temp_file(config.CVS_REVS_SUMMARY_DATAFILE)
     self._register_temp_file(config.CVS_SYMBOLS_SUMMARY_DATAFILE)
-    self._register_temp_file_needed(config.PROJECTS)
     self._register_temp_file_needed(config.SYMBOL_DB)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_STORE)
-    Ctx().revision_excluder.register_artifacts(self)
+    Ctx().revision_reader.get_revision_excluder().register_artifacts(self)
 
-  def run(self, run_options, stats_keeper):
-    Ctx()._projects = read_projects(
-        artifact_manager.get_temp_file(config.PROJECTS)
-        )
+  def run(self, stats_keeper):
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
     Ctx()._symbol_db = SymbolDatabase()
     cvs_item_store = OldCVSItemStore(
@@ -334,11 +216,10 @@ class FilterSymbolsPass(Pass):
         artifact_manager.get_temp_file(config.CVS_SYMBOLS_SUMMARY_DATAFILE),
         'w')
 
-    revision_excluder = Ctx().revision_excluder
+    revision_excluder = Ctx().revision_reader.get_revision_excluder()
 
     Log().quiet("Filtering out excluded symbols and summarizing items...")
 
-    stats_keeper.reset_cvs_rev_info()
     revision_excluder.start()
     # Process the cvs items store one file at a time:
     for cvs_file_items in cvs_item_store.iter_cvs_file_items():
@@ -350,12 +231,10 @@ class FilterSymbolsPass(Pass):
       cvs_file_items.record_closed_symbols()
 
       if Log().is_on(Log.DEBUG):
-        cvs_file_items.check_link_consistency()
+        cvs_file_items.check_symbol_parent_lods()
 
-      # Store whatever is left to the new file and update statistics:
-      stats_keeper.record_cvs_file(cvs_file_items.cvs_file)
+      # Store whatever is left to the new file:
       for cvs_item in cvs_file_items.values():
-        stats_keeper.record_cvs_item(cvs_item)
         cvs_items_db.add(cvs_item)
 
         if isinstance(cvs_item, CVSRevision):
@@ -365,8 +244,6 @@ class FilterSymbolsPass(Pass):
         elif isinstance(cvs_item, CVSSymbol):
           symbols_summary_file.write(
               '%x %x\n' % (cvs_item.symbol.id, cvs_item.id,))
-
-    stats_keeper.set_stats_reflect_exclude(True)
 
     revision_excluder.finish()
     symbols_summary_file.close()
@@ -386,7 +263,7 @@ class SortRevisionSummaryPass(Pass):
     self._register_temp_file(config.CVS_REVS_SUMMARY_SORTED_DATAFILE)
     self._register_temp_file_needed(config.CVS_REVS_SUMMARY_DATAFILE)
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     Log().quiet("Sorting CVS revision summaries...")
     sort_file(
         artifact_manager.get_temp_file(config.CVS_REVS_SUMMARY_DATAFILE),
@@ -402,7 +279,7 @@ class SortSymbolSummaryPass(Pass):
     self._register_temp_file(config.CVS_SYMBOLS_SUMMARY_SORTED_DATAFILE)
     self._register_temp_file_needed(config.CVS_SYMBOLS_SUMMARY_DATAFILE)
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     Log().quiet("Sorting CVS symbol summaries...")
     sort_file(
         artifact_manager.get_temp_file(config.CVS_SYMBOLS_SUMMARY_DATAFILE),
@@ -420,7 +297,6 @@ class InitializeChangesetsPass(Pass):
     self._register_temp_file(config.CHANGESETS_INDEX)
     self._register_temp_file(config.CVS_ITEMS_SORTED_STORE)
     self._register_temp_file(config.CVS_ITEMS_SORTED_INDEX_TABLE)
-    self._register_temp_file_needed(config.PROJECTS)
     self._register_temp_file_needed(config.SYMBOL_DB)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_FILTERED_STORE)
@@ -503,16 +379,15 @@ class InitializeChangesetsPass(Pass):
     CHANGESET at most once, even though the resulting changesets might
     themselves have internal dependencies."""
 
-    cvs_items = list(changeset.get_cvs_items())
+    cvs_items = changeset.get_cvs_items()
     # We only look for succ dependencies, since by doing so we
     # automatically cover pred dependencies as well.  First create a
     # list of tuples (pred, succ) of id pairs for CVSItems that depend
     # on each other.
     dependencies = []
-    changeset_cvs_item_ids = set(changeset.cvs_item_ids)
     for cvs_item in cvs_items:
       for next_id in cvs_item.get_succ_ids():
-        if next_id in changeset_cvs_item_ids:
+        if next_id in changeset.cvs_item_ids:
           # Sanity check: a CVSItem should never depend on itself:
           if next_id == cvs_item.id:
             raise InternalError('Item depends on itself: %s' % (cvs_item,))
@@ -522,6 +397,7 @@ class InitializeChangesetsPass(Pass):
     if dependencies:
       # Sort the cvs_items in a defined order (chronological to the
       # extent that the timestamps are correct and unique).
+      cvs_items = list(cvs_items)
       cvs_items.sort(self.compare_items)
       indexes = {}
       for i in range(len(cvs_items)):
@@ -590,12 +466,9 @@ class InitializeChangesetsPass(Pass):
     for changeset in self.get_symbol_changesets():
       yield changeset
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     Log().quiet("Creating preliminary commit sets...")
 
-    Ctx()._projects = read_projects(
-        artifact_manager.get_temp_file(config.PROJECTS)
-        )
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
     Ctx()._symbol_db = SymbolDatabase()
     Ctx()._cvs_items_db = IndexedCVSItemStore(
@@ -620,13 +493,13 @@ class InitializeChangesetsPass(Pass):
         artifact_manager.get_temp_file(config.CVS_ITEMS_SORTED_INDEX_TABLE),
         DB_OPEN_NEW)
 
-    self.changeset_key_generator = KeyGenerator()
+    self.changeset_key_generator = KeyGenerator(1)
 
     for changeset in self.get_changesets():
       if Log().is_on(Log.DEBUG):
         Log().debug(repr(changeset))
       changeset_graph.store_changeset(changeset)
-      for cvs_item in list(changeset.get_cvs_items()):
+      for cvs_item in changeset.get_cvs_items():
         self.sorted_cvs_items_db.add(cvs_item)
 
     self.sorted_cvs_items_db.close()
@@ -662,7 +535,6 @@ class BreakRevisionChangesetCyclesPass(Pass):
     self._register_temp_file(config.CHANGESETS_REVBROKEN_STORE)
     self._register_temp_file(config.CHANGESETS_REVBROKEN_INDEX)
     self._register_temp_file(config.CVS_ITEM_TO_CHANGESET_REVBROKEN)
-    self._register_temp_file_needed(config.PROJECTS)
     self._register_temp_file_needed(config.SYMBOL_DB)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_SORTED_STORE)
@@ -723,12 +595,9 @@ class BreakRevisionChangesetCyclesPass(Pass):
     for changeset in new_changesets:
       self.changeset_graph.add_new_changeset(changeset)
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     Log().quiet("Breaking revision changeset dependency cycles...")
 
-    Ctx()._projects = read_projects(
-        artifact_manager.get_temp_file(config.PROJECTS)
-        )
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
     Ctx()._symbol_db = SymbolDatabase()
     Ctx()._cvs_items_db = IndexedCVSItemStore(
@@ -791,7 +660,6 @@ class RevisionTopologicalSortPass(Pass):
   def register_artifacts(self):
     self._register_temp_file(config.CHANGESETS_REVSORTED_STORE)
     self._register_temp_file(config.CHANGESETS_REVSORTED_INDEX)
-    self._register_temp_file_needed(config.PROJECTS)
     self._register_temp_file_needed(config.SYMBOL_DB)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_SORTED_STORE)
@@ -848,12 +716,9 @@ class RevisionTopologicalSortPass(Pass):
 
     changeset_graph.close()
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     Log().quiet("Generating CVSRevisions in commit order...")
 
-    Ctx()._projects = read_projects(
-        artifact_manager.get_temp_file(config.PROJECTS)
-        )
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
     Ctx()._symbol_db = SymbolDatabase()
     Ctx()._cvs_items_db = IndexedCVSItemStore(
@@ -884,7 +749,6 @@ class BreakSymbolChangesetCyclesPass(Pass):
     self._register_temp_file(config.CHANGESETS_SYMBROKEN_STORE)
     self._register_temp_file(config.CHANGESETS_SYMBROKEN_INDEX)
     self._register_temp_file(config.CVS_ITEM_TO_CHANGESET_SYMBROKEN)
-    self._register_temp_file_needed(config.PROJECTS)
     self._register_temp_file_needed(config.SYMBOL_DB)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_SORTED_STORE)
@@ -944,12 +808,9 @@ class BreakSymbolChangesetCyclesPass(Pass):
     for changeset in new_changesets:
       self.changeset_graph.add_new_changeset(changeset)
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     Log().quiet("Breaking symbol changeset dependency cycles...")
 
-    Ctx()._projects = read_projects(
-        artifact_manager.get_temp_file(config.PROJECTS)
-        )
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
     Ctx()._symbol_db = SymbolDatabase()
     Ctx()._cvs_items_db = IndexedCVSItemStore(
@@ -1011,7 +872,6 @@ class BreakAllChangesetCyclesPass(Pass):
     self._register_temp_file(config.CHANGESETS_ALLBROKEN_STORE)
     self._register_temp_file(config.CHANGESETS_ALLBROKEN_INDEX)
     self._register_temp_file(config.CVS_ITEM_TO_CHANGESET_ALLBROKEN)
-    self._register_temp_file_needed(config.PROJECTS)
     self._register_temp_file_needed(config.SYMBOL_DB)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_SORTED_STORE)
@@ -1163,12 +1023,9 @@ class BreakAllChangesetCyclesPass(Pass):
     # Unwrap the cycle into a segment then break the segment:
     self.break_segment([cycle[-1]] + cycle + [cycle[0]])
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     Log().quiet("Breaking CVSSymbol dependency loops...")
 
-    Ctx()._projects = read_projects(
-        artifact_manager.get_temp_file(config.PROJECTS)
-        )
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
     Ctx()._symbol_db = SymbolDatabase()
     Ctx()._cvs_items_db = IndexedCVSItemStore(
@@ -1286,7 +1143,6 @@ class TopologicalSortPass(Pass):
 
   def register_artifacts(self):
     self._register_temp_file(config.CHANGESETS_SORTED_DATAFILE)
-    self._register_temp_file_needed(config.PROJECTS)
     self._register_temp_file_needed(config.SYMBOL_DB)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_SORTED_STORE)
@@ -1337,12 +1193,9 @@ class TopologicalSortPass(Pass):
 
     changeset_graph.close()
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     Log().quiet("Generating CVSRevisions in commit order...")
 
-    Ctx()._projects = read_projects(
-        artifact_manager.get_temp_file(config.PROJECTS)
-        )
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
     Ctx()._symbol_db = SymbolDatabase()
     Ctx()._cvs_items_db = IndexedCVSItemStore(
@@ -1357,7 +1210,13 @@ class TopologicalSortPass(Pass):
     for (changeset, timestamp) in self.get_changesets():
       sorted_changesets.write('%x %08x\n' % (changeset.id, timestamp,))
 
+      for cvs_item in changeset.get_cvs_items():
+        stats_keeper.record_cvs_item(cvs_item)
+
     sorted_changesets.close()
+
+    stats_keeper.set_stats_reflect_exclude(True)
+    stats_keeper.archive()
 
     Ctx()._cvs_items_db.close()
     Ctx()._symbol_db.close()
@@ -1380,7 +1239,6 @@ class CreateRevsPass(Pass):
     self._register_temp_file(config.SVN_COMMITS_STORE)
     self._register_temp_file(config.CVS_REVS_TO_SVN_REVNUMS)
     self._register_temp_file(config.SYMBOL_OPENINGS_CLOSINGS)
-    self._register_temp_file_needed(config.PROJECTS)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_SORTED_STORE)
     self._register_temp_file_needed(config.CVS_ITEMS_SORTED_INDEX_TABLE)
@@ -1406,9 +1264,10 @@ class CreateRevsPass(Pass):
 
     changeset_db.close()
 
-  def get_svn_commits(self, creator):
+  def get_svn_commits(self):
     """Generate the SVNCommits, in order."""
 
+    creator = SVNCommitCreator()
     for (changeset, timestamp) in self.get_changesets():
       for svn_commit in creator.process_changeset(changeset, timestamp):
         yield svn_commit
@@ -1416,21 +1275,16 @@ class CreateRevsPass(Pass):
   def log_svn_commit(self, svn_commit):
     """Output information about SVN_COMMIT."""
 
-    Log().normal(
-        'Creating Subversion r%d (%s)'
-        % (svn_commit.revnum, svn_commit.get_description(),)
-        )
+    Log().normal("Creating Subversion r%d (%s)"
+                 % (svn_commit.revnum, svn_commit.description))
 
     if isinstance(svn_commit, SVNRevisionCommit):
       for cvs_rev in svn_commit.cvs_revs:
         Log().verbose(' %s %s' % (cvs_rev.cvs_path, cvs_rev.rev,))
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     Log().quiet("Mapping CVS revisions to Subversion commits...")
 
-    Ctx()._projects = read_projects(
-        artifact_manager.get_temp_file(config.PROJECTS)
-        )
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
     Ctx()._symbol_db = SymbolDatabase()
     Ctx()._metadata_db = MetadataDatabase(DB_OPEN_READ)
@@ -1443,13 +1297,9 @@ class CreateRevsPass(Pass):
 
     persistence_manager = PersistenceManager(DB_OPEN_NEW)
 
-    creator = SVNCommitCreator()
-    for svn_commit in self.get_svn_commits(creator):
+    for svn_commit in self.get_svn_commits():
       self.log_svn_commit(svn_commit)
       persistence_manager.put_svn_commit(svn_commit)
-
-    stats_keeper.set_svn_rev_count(creator.revnum_generator.get_last_id())
-    del creator
 
     persistence_manager.close()
     Ctx()._symbolings_logger.close()
@@ -1457,6 +1307,9 @@ class CreateRevsPass(Pass):
     Ctx()._metadata_db.close()
     Ctx()._symbol_db.close()
     Ctx()._cvs_file_db.close()
+
+    stats_keeper.set_svn_rev_count(SVNCommit.revnum - 1)
+    stats_keeper.archive()
 
     Log().quiet("Done")
 
@@ -1468,7 +1321,7 @@ class SortSymbolsPass(Pass):
     self._register_temp_file(config.SYMBOL_OPENINGS_CLOSINGS_SORTED)
     self._register_temp_file_needed(config.SYMBOL_OPENINGS_CLOSINGS)
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     Log().quiet("Sorting symbolic name source revisions...")
 
     sort_file(
@@ -1484,7 +1337,6 @@ class IndexSymbolsPass(Pass):
 
   def register_artifacts(self):
     self._register_temp_file(config.SYMBOL_OFFSETS_DB)
-    self._register_temp_file_needed(config.PROJECTS)
     self._register_temp_file_needed(config.SYMBOL_DB)
     self._register_temp_file_needed(config.SYMBOL_OPENINGS_CLOSINGS_SORTED)
 
@@ -1522,11 +1374,8 @@ class IndexSymbolsPass(Pass):
     cPickle.dump(offsets, offsets_db, -1)
     offsets_db.close()
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     Log().quiet("Determining offsets for all symbolic names...")
-    Ctx()._projects = read_projects(
-        artifact_manager.get_temp_file(config.PROJECTS)
-        )
     Ctx()._symbol_db = SymbolDatabase()
     self.generate_offsets_for_symbolings()
     Ctx()._symbol_db.close()
@@ -1537,7 +1386,9 @@ class OutputPass(Pass):
   """This pass was formerly known as pass8."""
 
   def register_artifacts(self):
-    self._register_temp_file_needed(config.PROJECTS)
+    self._register_temp_file(config.SVN_MIRROR_REVISIONS_TABLE)
+    self._register_temp_file(config.SVN_MIRROR_NODES_INDEX_TABLE)
+    self._register_temp_file(config.SVN_MIRROR_NODES_STORE)
     self._register_temp_file_needed(config.CVS_FILES_DB)
     self._register_temp_file_needed(config.CVS_ITEMS_SORTED_STORE)
     self._register_temp_file_needed(config.CVS_ITEMS_SORTED_INDEX_TABLE)
@@ -1546,18 +1397,24 @@ class OutputPass(Pass):
     self._register_temp_file_needed(config.SVN_COMMITS_INDEX_TABLE)
     self._register_temp_file_needed(config.SVN_COMMITS_STORE)
     self._register_temp_file_needed(config.CVS_REVS_TO_SVN_REVNUMS)
-    Ctx().output_option.register_artifacts(self)
+    self._register_temp_file_needed(config.SYMBOL_OPENINGS_CLOSINGS_SORTED)
+    self._register_temp_file_needed(config.SYMBOL_OFFSETS_DB)
+    Ctx().revision_reader.register_artifacts(self)
 
   def get_svn_commits(self):
     """Generate the SVNCommits in commit order."""
 
     persistence_manager = PersistenceManager(DB_OPEN_READ)
 
-    svn_revnum = 1 # The first non-trivial commit
+    svn_revnum = 2 # The first non-trivial commit
 
     # Peek at the first revision to find the date to use to initialize
     # the repository:
     svn_commit = persistence_manager.get_svn_commit(svn_revnum)
+
+    # Initialize the repository by creating the directories for trunk,
+    # tags, and branches.
+    yield SVNInitialProjectCommit(svn_commit.date, 1)
 
     while svn_commit:
       yield svn_commit
@@ -1566,10 +1423,7 @@ class OutputPass(Pass):
 
     persistence_manager.close()
 
-  def run(self, run_options, stats_keeper):
-    Ctx()._projects = read_projects(
-        artifact_manager.get_temp_file(config.PROJECTS)
-        )
+  def run(self, stats_keeper):
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
     Ctx()._metadata_db = MetadataDatabase(DB_OPEN_READ)
     Ctx()._cvs_items_db = IndexedCVSItemStore(
@@ -1577,14 +1431,22 @@ class OutputPass(Pass):
         artifact_manager.get_temp_file(config.CVS_ITEMS_SORTED_INDEX_TABLE),
         DB_OPEN_READ)
     Ctx()._symbol_db = SymbolDatabase()
+    repos = SVNRepositoryMirror()
 
-    Ctx().output_option.setup(stats_keeper.svn_rev_count())
+    Ctx().output_option.setup(repos)
+
+    repos.add_delegate(StdoutDelegate(stats_keeper.svn_rev_count()))
+
+    Ctx().revision_reader.start()
 
     for svn_commit in self.get_svn_commits():
-      svn_commit.output(Ctx().output_option)
+      svn_commit.commit(repos)
+
+    repos.close()
+
+    Ctx().revision_reader.finish()
 
     Ctx().output_option.cleanup()
-
     Ctx()._symbol_db.close()
     Ctx()._cvs_items_db.close()
     Ctx()._metadata_db.close()

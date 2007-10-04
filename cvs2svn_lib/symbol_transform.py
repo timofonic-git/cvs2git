@@ -27,18 +27,11 @@ from cvs2svn_lib.boolean import *
 class SymbolTransform:
   """Transform symbol names arbitrarily."""
 
-  def transform(self, cvs_file, symbol_name, revision):
+  def transform(self, cvs_file, symbol_name):
     """Possibly transform SYMBOL_NAME, which was found in CVS_FILE.
 
     Return the transformed symbol name.  If this SymbolTransform
-    doesn't apply, return the original SYMBOL_NAME.  If this symbol
-    should be ignored entirely, return None.  (Please note that
-    ignoring a branch via this mechanism only causes the branch *name*
-    to be ignored; the branch contents will still be converted.
-    Usually branches should be excluded using --exclude.)
-
-    REVISION contains the CVS revision number to which the symbol was
-    attached in the file as a string (with zeros removed).
+    doesn't apply, return the original SYMBOL_NAME.
 
     This method is free to use the information in CVS_FILE (including
     CVS_FILE.project) to decide whether and/or how to transform
@@ -62,38 +55,7 @@ class RegexpSymbolTransform(SymbolTransform):
     self.pattern = re.compile('^' + pattern + '$')
     self.replacement = replacement
 
-  def transform(self, cvs_file, symbol_name, revision):
+  def transform(self, cvs_file, symbol_name):
     return self.pattern.sub(self.replacement, symbol_name)
-
-
-class SymbolMapper(SymbolTransform):
-  """A SymbolTransform that transforms specific symbol definitions.
-
-  The user has to specify the exact CVS filename, symbol name, and
-  revision number to be transformed, and the new name (or None if the
-  symbol should be ignored).  The mappings can be set via a
-  constructor argument or by calling __setitem__()."""
-
-  def __init__(self, items=[]):
-    """Initialize the mapper.
-
-    ITEMS is a list of tuples (cvs_filename, symbol_name, revision,
-    new_name) which will be set as mappings."""
-
-    # A map {(cvs_filename, symbol_name, revision) : new_name}:
-    self._map = {}
-
-    for (cvs_filename, symbol_name, revision, new_name) in items:
-      self._map[cvs_filename, symbol_name, revision] = new_name
-
-  def __setitem__(self, (cvs_filename, symbol_name, revision), new_name):
-    """Set a mapping for a particular file, symbol, and revision."""
-
-    self._map[cvs_filename, symbol_name, revision] = new_name
-
-  def transform(self, cvs_file, symbol_name, revision):
-    return self._map.get(
-        (cvs_file.filename, symbol_name, revision), symbol_name
-        )
 
 

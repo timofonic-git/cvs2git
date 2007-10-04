@@ -21,35 +21,26 @@ import os
 import md5
 
 from cvs2svn_lib.boolean import *
-from cvs2svn_lib.set_support import *
 from cvs2svn_lib import config
 from cvs2svn_lib.common import CommandError
 from cvs2svn_lib.common import FatalError
 from cvs2svn_lib.common import OP_ADD
 from cvs2svn_lib.common import OP_CHANGE
-from cvs2svn_lib.common import path_split
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.svn_repository_mirror import SVNRepositoryMirrorDelegate
-from cvs2svn_lib.apple_single_filter import get_maybe_apple_single_stream
 
 
 class DumpfileDelegate(SVNRepositoryMirrorDelegate):
   """Create a Subversion dumpfile."""
 
-  def __init__(self, revision_reader, dumpfile_path):
+  def __init__(self, dumpfile_path):
     """Return a new DumpfileDelegate instance, attached to a dumpfile
     DUMPFILE_PATH, using Ctx().filename_utf8_encoder()."""
 
-    self._revision_reader = revision_reader
     self.dumpfile_path = dumpfile_path
 
     self.dumpfile = open(self.dumpfile_path, 'wb')
     self._write_dumpfile_header(self.dumpfile)
-
-    # A set of the basic project infrastructure project directories
-    # that have been created so far, as SVN paths.  (The root
-    # directory is considered to be present at initialization.)
-    self._basic_directories = set([''])
 
   def _write_dumpfile_header(self, dumpfile):
     # Initialize the dumpfile with the standard headers.
@@ -143,37 +134,6 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
   def end_commit(self):
     pass
 
-  def _create_basic_directory(self, path):
-    """Create PATH in the repository if it is not already there.
-
-    This method should only be used for the basic project TTB
-    directories, not for directories with a project."""
-
-    if path not in self._basic_directories:
-      # Make sure that the parent directory is present:
-      self._create_basic_directory(path_split(path)[0])
-      self.mkdir(path)
-      self._basic_directories.add(path)
-
-  def initialize_project(self, project):
-    """Create the TTB directories for the project.
-
-    Be sure not to create parent directories that already exist (e.g.,
-    because two directories share part of their paths either within or
-    across projects)."""
-
-    # For a trunk-only conversion, trunk_path might be ''.
-    if project.trunk_path:
-      self._create_basic_directory(project.trunk_path)
-    if not Ctx().trunk_only:
-      self._create_basic_directory(project.branches_path)
-      self._create_basic_directory(project.tags_path)
-
-  def initialize_lod(self, lod):
-    lod_path = lod.get_path()
-    if lod_path:
-      self.mkdir(lod_path)
-
   def mkdir(self, path):
     """Emit the creation of directory PATH."""
 
@@ -248,25 +208,21 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
     # If the file has keywords, we must prevent CVS/RCS from expanding
     # the keywords because they must be unexpanded in the repository,
     # or Subversion will get confused.
-    stream = self._revision_reader.get_content_stream(
-        cvs_rev, suppress_keyword_substitution=s_item.has_keywords()
-        )
-
-    if Ctx().decode_apple_single:
-      # Insert a filter to decode any files that are in AppleSingle
-      # format:
-      stream = get_maybe_apple_single_stream(stream)
+    stream = Ctx().revision_reader.get_content_stream(
+        cvs_rev, suppress_keyword_substitution=s_item.has_keywords())
 
     # Insert a filter to convert all EOLs to LFs if neccessary
     if s_item.needs_eol_filter():
-      stream = LF_EOL_Filter(stream)
+      data_reader = LF_EOL_Filter(stream)
+    else:
+      data_reader = stream
 
     buf = None
 
     # treat .cvsignore as a directory property
     dir_path, basename = os.path.split(cvs_rev.get_svn_path())
     if basename == ".cvsignore":
-      buf = stream.read()
+      buf = data_reader.read()
       ignore_vals = generate_ignores(buf)
       ignore_contents = '\n'.join(ignore_vals)
       if ignore_contents:
@@ -309,12 +265,12 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
     checksum = md5.new()
     length = 0
     if buf is None:
-      buf = stream.read(config.PIPE_READ_SIZE)
+      buf = data_reader.read(config.PIPE_READ_SIZE)
     while buf != '':
       checksum.update(buf)
       length += len(buf)
       self.dumpfile.write(buf)
-      buf = stream.read(config.PIPE_READ_SIZE)
+      buf = data_reader.read(config.PIPE_READ_SIZE)
 
     stream.close()
 
@@ -348,6 +304,10 @@ class DumpfileDelegate(SVNRepositoryMirrorDelegate):
     """Emit the change corresponding to S_ITEM, an SVNCommitItem."""
 
     self._add_or_change_path(s_item, OP_CHANGE)
+
+  def skip_path(self, cvs_rev):
+    """Ensure that the unneeded revisions are accounted for as well."""
+    Ctx().revision_reader.skip_content(cvs_rev)
 
   def delete_path(self, path):
     """Emit the deletion of PATH."""
@@ -412,9 +372,5 @@ class LF_EOL_Filter:
       buf = buf.replace('\r', '\n')
       if buf or self.eof:
         return buf
-
-  def close(self):
-    self.stream.close()
-    self.stream = None
 
 

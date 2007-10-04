@@ -14,97 +14,118 @@
 # history and logs, available at http://cvs2svn.tigris.org/.
 # ====================================================================
 
-"""This module contains the SVNCommit classes.
-
-There are five types of SVNCommits:
-
-  SVNInitialProjectCommit -- Initializes a project (creates its trunk,
-      branches, and tags directories).
-
-  SVNPrimaryCommit -- Commits one or more CVSRevisions on one or more
-      lines of development.
-
-  SVNBranchCommit -- Creates or fills a branch; that is, copies files
-      from a source line of development to a target branch.
-
-  SVNTagCommit -- Creates or fills a tag; that is, copies files from a
-      source line of development to a target tag.
-
-  SVNPostCommit -- Updates trunk to reflect changes on a non-trunk
-      default branch.
-
-"""
+"""This module contains the SVNCommit classes."""
 
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib.common import InternalError
+from cvs2svn_lib.common import format_date
+from cvs2svn_lib.common import warning_prefix
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.log import Log
 from cvs2svn_lib.symbol import Branch
 from cvs2svn_lib.symbol import Tag
+from cvs2svn_lib.cvs_item import CVSRevisionAdd
+from cvs2svn_lib.cvs_item import CVSRevisionChange
+from cvs2svn_lib.cvs_item import CVSRevisionDelete
+from cvs2svn_lib.cvs_item import CVSRevisionNoop
 
 
 class SVNCommit:
-  """This represents one commit to the Subversion Repository."""
+  """This represents one commit to the Subversion Repository.  There
+  are three types of SVNCommits:
 
-  def __init__(self, date, revnum):
-    """Instantiate an SVNCommit.
+  1. Commits one or more CVSRevisions (cannot fill a symbolic name).
 
-    REVNUM is the SVN revision number of this commit."""
+  2. Creates or fills a symbolic name (cannot commit CVSRevisions).
+
+  3. Updates trunk to reflect the contents of a particular branch
+     (this is to handle RCS default branches)."""
+
+  # The revision number to assign to the next new SVNCommit.
+  # We start at 2 because SVNRepositoryMirror uses the first commit
+  # to create trunk, tags, and branches.
+  revnum = 2
+
+  def __init__(self, description, date, revnum=None):
+    """Instantiate an SVNCommit.  DESCRIPTION is for debugging only.
+    If REVNUM, the SVNCommit will correspond to that revision number;
+    and if CVS_REVS, then they must be the exact set of CVSRevisions for
+    REVNUM.
+
+    It is an error to pass CVS_REVS without REVNUM, but you may pass
+    REVNUM without CVS_REVS, and then add a revision at a time by
+    invoking add_revision()."""
+
+    self.description = description
 
     # The date of the commit, as an integer.  While the SVNCommit is
     # being built up, this contains the latest date seen so far.  This
     # member is set externally.
     self.date = date
 
-    # The SVN revision number of this commit, as an integer.
-    self.revnum = revnum
+    # Revprop metadata for this commit.
+    #
+    # These initial values are placeholders.  At least the log and the
+    # date should be different by the time these are used.
+    #
+    # They are private because their values should be returned encoded
+    # in UTF8, but callers aren't required to set them in UTF8.
+    # Therefore, accessor methods are used to set them, and
+    # self._get_revprops() is used to to get them, in dictionary form.
+    self._author = Ctx().username
+    self._log_msg = "This log message means an SVNCommit was used too soon."
 
-  def __getstate__(self):
-    return (self.date, self.revnum,)
-
-  def __setstate__(self, state):
-    (self.date, self.revnum,) = state
+    if revnum:
+      self.revnum = revnum
+    else:
+      self.revnum = SVNCommit.revnum
+      SVNCommit.revnum += 1
 
   def get_cvs_items(self):
     """Return a list containing the CVSItems in this commit."""
 
     raise NotImplementedError()
 
-  def get_author(self):
-    """Return the author or this commit, or None if none is to be used.
-
-    The return value is exactly as the author appeared in the RCS
-    file, with undefined character encoding."""
+  def _get_log_msg(self):
+    """Return a log message for this commit."""
 
     raise NotImplementedError()
 
-  def get_log_msg(self):
-    """Return a log message for this commit.
+  def _get_revprops(self):
+    """Return the Subversion revprops for this SVNCommit."""
 
-    The return value is exactly as the log message appeared in the RCS
-    file, with undefined character encoding."""
+    date = format_date(self.date)
+    log_msg = self._get_log_msg()
+    try:
+      utf8_author = None
+      if self._author is not None:
+        utf8_author = Ctx().utf8_encoder(self._author)
+      utf8_log = Ctx().utf8_encoder(log_msg)
+      return { 'svn:author' : utf8_author,
+               'svn:log'    : utf8_log,
+               'svn:date'   : date }
+    except UnicodeError:
+      Log().warn('%s: problem encoding author or log message:'
+                 % warning_prefix)
+      Log().warn("  author: '%s'" % self._author)
+      Log().warn("  log:    '%s'" % log_msg.rstrip())
+      Log().warn("  date:   '%s'" % date)
+      if isinstance(self, SVNRevisionCommit):
+        Log().warn("(subversion rev %s)  Related files:" % self.revnum)
+        for cvs_rev in self.cvs_revs:
+          Log().warn(" ", cvs_rev.cvs_file.filename)
+      else:
+        Log().warn("(subversion rev %s)" % self.revnum)
 
-    raise NotImplementedError()
-
-  def get_warning_summary(self):
-    """Return a summary of this commit that can be used in warnings."""
-
-    return '(subversion rev %s)' % (self.revnum,)
-
-  def get_description(self):
-    """Return a partial description of this SVNCommit, for logging."""
-
-    raise NotImplementedError()
-
-  def output(self, output_option):
-    """Cause this commit to be output to OUTPUT_OPTION.
-
-    This method is used for double-dispatch.  Derived classes should
-    call the OutputOption.process_*_commit() method appropriate for
-    the type of SVNCommit."""
-
-    raise NotImplementedError()
+      Log().warn(
+          "Consider rerunning with one or more '--encoding' parameters or\n"
+          "with '--fallback-encoding'.\n")
+      # It's better to fall back to the original (unknown encoding) data
+      # than to either 1) quit or 2) record nothing at all.
+      return { 'svn:author' : self._author,
+               'svn:log'    : log_msg,
+               'svn:date'   : date }
 
   def __str__(self):
     """ Print a human-readable description of this SVNCommit.
@@ -112,103 +133,43 @@ class SVNCommit:
     This description is not intended to be machine-parseable."""
 
     ret = "SVNCommit #: " + str(self.revnum) + "\n"
-    ret += "   debug description: " + self.get_description() + "\n"
+    ret += "   debug description: " + self.description + "\n"
     return ret
 
 
-class SVNInitialProjectCommit(SVNCommit):
-  def __init__(self, date, projects, revnum):
-    SVNCommit.__init__(self, date, revnum)
-    self.projects = list(projects)
-
-  def __getstate__(self):
-    return (
-        SVNCommit.__getstate__(self),
-        [project.id for project in self.projects],
-        )
-
-  def __setstate__(self, state):
-    (svn_commit_state, project_ids,) = state
-    SVNCommit.__setstate__(self, svn_commit_state)
-    self.projects = [
-        Ctx()._projects[project_id] for project_id in project_ids
-        ]
-
-  def get_cvs_items(self):
-    return []
-
-  def get_author(self):
-    return Ctx().username
-
-  def get_log_msg(self):
-    return 'Standard project directories initialized by cvs2svn.'
-
-  def get_description(self):
-    return 'Project initialization'
-
-  def output(self, output_option):
-    output_option.process_initial_project_commit(self)
-
-
 class SVNRevisionCommit(SVNCommit):
-  """A SVNCommit that includes actual CVS revisions."""
+  """A mixin for a SVNCommit that includes actual CVS revisions."""
 
-  def __init__(self, cvs_revs, date, revnum):
-    SVNCommit.__init__(self, date, revnum)
+  def __init__(self, cvs_revs):
+    """Initialize the cvs_revs member.
+
+    Derived classes must also call the SVNCommit constructor explicitly."""
 
     self.cvs_revs = list(cvs_revs)
-
-    # These values are set lazily by _get_metadata():
-    self._author = None
-    self._log_msg = None
-
-  def __getstate__(self):
-    """Return the part of the state represented by this mixin."""
-
-    return (
-        SVNCommit.__getstate__(self),
-        [cvs_rev.id for cvs_rev in self.cvs_revs],
-        )
-
-  def __setstate__(self, state):
-    """Restore the part of the state represented by this mixin."""
-
-    (svn_commit_state, cvs_rev_ids) = state
-    SVNCommit.__setstate__(self, svn_commit_state)
-
-    self.cvs_revs = [
-        cvs_rev
-        for (id, cvs_rev) in Ctx()._cvs_items_db.get_many(cvs_rev_ids)
-        ]
-    self._author = None
-    self._log_msg = None
 
   def get_cvs_items(self):
     return self.cvs_revs
 
-  def _get_metadata(self):
-    """Return the tuple (author, log_msg,) for this commit."""
+  def __getstate__(self):
+    """Return the part of the state represented by this mixin."""
 
-    if self._author is None:
-      # Set self._author and self._log_msg for this commit from that
-      # of the first cvs revision.
-      if not self.cvs_revs:
-        raise InternalError('SVNPrimaryCommit contains no CVS revisions')
+    return ['%x' % (x.id,) for x in self.cvs_revs]
 
+  def __setstate__(self, state):
+    """Restore the part of the state represented by this mixin."""
+
+    cvs_rev_keys = state
+
+    cvs_revs = []
+    keys = [int(key, 16) for key in cvs_rev_keys]
+    cvs_revs = Ctx()._cvs_items_db.get_many(keys)
+    SVNRevisionCommit.__init__(self, cvs_revs)
+
+    # Set the author and log message for this commit from the first
+    # cvs revision.
+    if self.cvs_revs:
       metadata_id = self.cvs_revs[0].metadata_id
       self._author, self._log_msg = Ctx()._metadata_db[metadata_id]
-
-    return self._author, self._log_msg
-
-  def get_author(self):
-    return self._get_metadata()[0]
-
-  def get_warning_summary(self):
-    retval = []
-    retval.append(SVNCommit.get_warning_summary(self) + '  Related files:')
-    for cvs_rev in self.cvs_revs:
-      retval.append('  ' + cvs_rev.cvs_file.filename)
-    return '\n'.join(retval)
 
   def __str__(self):
     """Return the revision part of a description of this SVNCommit.
@@ -216,33 +177,154 @@ class SVNRevisionCommit(SVNCommit):
     Derived classes should append the output of this method to the
     output of SVNCommit.__str__()."""
 
-    ret = []
-    ret.append(SVNCommit.__str__(self))
-    ret.append('   cvs_revs:\n')
+    ret = "   cvs_revs:\n"
     for cvs_rev in self.cvs_revs:
-      ret.append('     %x\n' % (cvs_rev.id,))
-    return ''.join(ret)
+      ret += "     %x\n" % (cvs_rev.id,)
+    return ret
 
 
-class SVNPrimaryCommit(SVNRevisionCommit):
-  def __init__(self, cvs_revs, date, revnum):
-    SVNRevisionCommit.__init__(self, cvs_revs, date, revnum)
+class SVNInitialProjectCommit(SVNCommit):
+  def __init__(self, date, revnum=None):
+    SVNCommit.__init__(self, 'Initialization', date, revnum)
 
-  def get_log_msg(self):
+  def get_cvs_items(self):
+    return []
+
+  def _get_log_msg(self):
+    return 'New repository initialized by cvs2svn.'
+
+  def commit(self, repos):
+    # FIXME: It would be nicer to create a project's TTB directories
+    # only after the first commit to the project.
+
+    repos.start_commit(self.revnum, self._get_revprops())
+
+    for project in Ctx().projects:
+      # For a trunk-only conversion, trunk_path might be ''.
+      if project.trunk_path:
+        repos.mkdir(project.trunk_path)
+      if not Ctx().trunk_only:
+        repos.mkdir(project.branches_path)
+        repos.mkdir(project.tags_path)
+
+    repos.end_commit()
+
+
+class SVNPrimaryCommit(SVNCommit, SVNRevisionCommit):
+  def __init__(self, cvs_revs, date, revnum=None):
+    SVNCommit.__init__(self, 'commit', date, revnum)
+    SVNRevisionCommit.__init__(self, cvs_revs)
+
+  def get_cvs_items(self):
+    return SVNRevisionCommit.get_cvs_items(self)
+
+  def __str__(self):
+    return SVNCommit.__str__(self) + SVNRevisionCommit.__str__(self)
+
+  def _get_log_msg(self):
     """Return the actual log message for this commit."""
 
-    return self._get_metadata()[1]
+    return self._log_msg
 
-  def get_description(self):
-    return 'commit'
+  def commit(self, repos):
+    """Commit SELF to REPOS, which is a SVNRepositoryMirror."""
 
-  def output(self, output_option):
-    output_option.process_primary_commit(self)
+    repos.start_commit(self.revnum, self._get_revprops())
+
+    # This actually commits CVSRevisions
+    if len(self.cvs_revs) > 1:
+      plural = "s"
+    else:
+      plural = ""
+    Log().verbose("Committing %d CVSRevision%s"
+                  % (len(self.cvs_revs), plural))
+    for cvs_rev in self.cvs_revs:
+      if isinstance(cvs_rev, CVSRevisionNoop):
+        pass
+
+      elif isinstance(cvs_rev, CVSRevisionDelete):
+        repos.delete_path(cvs_rev.get_svn_path(), Ctx().prune)
+
+      elif isinstance(cvs_rev, CVSRevisionAdd):
+        repos.add_path(cvs_rev)
+
+      elif isinstance(cvs_rev, CVSRevisionChange):
+        repos.change_path(cvs_rev)
+
+    repos.end_commit()
+
+  def __getstate__(self):
+    return (self.revnum, self.date, SVNRevisionCommit.__getstate__(self),)
+
+  def __setstate__(self, state):
+    (revnum, date, rev_state,) = state
+    SVNCommit.__init__(self, "Retrieved from disk", date, revnum)
+    SVNRevisionCommit.__setstate__(self, rev_state)
 
 
-class SVNPostCommit(SVNRevisionCommit):
-  def __init__(self, motivating_revnum, cvs_revs, date, revnum):
-    SVNRevisionCommit.__init__(self, cvs_revs, date, revnum)
+class SVNSymbolCommit(SVNCommit):
+  def __init__(self, symbol, cvs_symbol_ids, date, revnum=None):
+    SVNCommit.__init__(
+        self, 'copying to tag/branch %r' % symbol.name, date, revnum)
+
+    # The TypedSymbol that is filled in this SVNCommit.
+    self.symbol = symbol
+
+    self.cvs_symbol_ids = cvs_symbol_ids
+
+  def get_cvs_items(self):
+    return list(Ctx()._cvs_items_db.get_many(self.cvs_symbol_ids))
+
+  def _get_log_msg(self):
+    """Return a manufactured log message for this commit."""
+
+    # Determine whether self.symbol is a tag.
+    if isinstance(self.symbol, Tag):
+      type = 'tag'
+    else:
+      assert isinstance(self.symbol, Branch)
+      type = 'branch'
+
+    # In Python 2.2.3, we could use textwrap.fill().  Oh well :-).
+    space_or_newline = ' '
+    cleaned_symbolic_name = self.symbol.get_clean_name()
+    if len(cleaned_symbolic_name) >= 13:
+      space_or_newline = '\n'
+
+    return "This commit was manufactured by cvs2svn to create %s%s'%s'." \
+           % (type, space_or_newline, cleaned_symbolic_name)
+
+  def commit(self, repos):
+    """Commit SELF to REPOS, which is a SVNRepositoryMirror."""
+
+    repos.start_commit(self.revnum, self._get_revprops())
+    Log().verbose("Filling symbolic name:", self.symbol.get_clean_name())
+    repos.fill_symbol(self)
+
+    repos.end_commit()
+
+  def __getstate__(self):
+    return (self.revnum, self.symbol.id, self.cvs_symbol_ids, self.date)
+
+  def __setstate__(self, state):
+    (revnum, symbol_id, cvs_symbol_ids, date) = state
+    symbol = Ctx()._symbol_db.get_symbol(symbol_id)
+    SVNSymbolCommit.__init__(self, symbol, cvs_symbol_ids, date, revnum)
+
+  def __str__(self):
+    """ Print a human-readable description of this SVNCommit.
+
+    This description is not intended to be machine-parseable."""
+
+    return (
+        SVNCommit.__str__(self)
+        + "   symbolic name: %s\n" % self.symbol.get_clean_name())
+
+
+class SVNPostCommit(SVNCommit, SVNRevisionCommit):
+  def __init__(self, motivating_revnum, cvs_revs, date):
+    SVNCommit.__init__(self, 'post-commit default branch(es)', date)
+    SVNRevisionCommit.__init__(self, cvs_revs)
 
     # The subversion revision number of the *primary* commit where the
     # default branch changes actually happened.  (NOTE: Secondary
@@ -256,17 +338,7 @@ class SVNPostCommit(SVNRevisionCommit):
     # the same motivating commit revision number, and it is possible
     # for a single synchronization commit to contain CVSRevisions on
     # multiple different default branches.
-    self.motivating_revnum = motivating_revnum
-
-  def __getstate__(self):
-    return (
-        SVNRevisionCommit.__getstate__(self),
-        self.motivating_revnum,
-        )
-
-  def __setstate__(self, state):
-    (rev_state, self.motivating_revnum,) = state
-    SVNRevisionCommit.__setstate__(self, rev_state)
+    self._motivating_revnum = motivating_revnum
 
   def get_cvs_items(self):
     # It might seem that we should return
@@ -275,109 +347,69 @@ class SVNPostCommit(SVNRevisionCommit):
     # commits to those.
     return []
 
-  def get_log_msg(self):
+  def __str__(self):
+    return SVNCommit.__str__(self) + SVNRevisionCommit.__str__(self)
+
+  def _get_log_msg(self):
     """Return a manufactured log message for this commit."""
 
     return (
         'This commit was generated by cvs2svn to compensate for '
         'changes in r%d,\n'
         'which included commits to RCS files with non-trunk default '
-        'branches.\n') % self.motivating_revnum
+        'branches.\n') % self._motivating_revnum
 
-  def get_description(self):
-    return 'post-commit default branch(es)'
+  def commit(self, repos):
+    """Commit SELF to REPOS, which is a SVNRepositoryMirror.
 
-  def output(self, output_option):
-    output_option.process_post_commit(self)
+    Propagate any changes that happened on a non-trunk default branch
+    to the trunk of the repository.  See
+    SVNCommitCreator._post_commit() for details on why this is
+    necessary."""
 
+    repos.start_commit(self.revnum, self._get_revprops())
 
-class SVNSymbolCommit(SVNCommit):
-  def __init__(self, symbol, cvs_symbol_ids, date, revnum):
-    SVNCommit.__init__(self, date, revnum)
+    Log().verbose("Synchronizing default_branch motivated by %d"
+                  % self._motivating_revnum)
 
-    # The TypedSymbol that is filled in this SVNCommit.
-    self.symbol = symbol
+    for cvs_rev in self.cvs_revs:
+      svn_trunk_path = cvs_rev.cvs_file.project.get_trunk_path(
+          cvs_rev.cvs_path)
+      if isinstance(cvs_rev, CVSRevisionAdd):
+        # Copy from branch to trunk:
+        repos.copy_path(
+            cvs_rev.get_svn_path(), svn_trunk_path,
+            self._motivating_revnum, True
+            )
+      elif isinstance(cvs_rev, CVSRevisionChange):
+        # Delete old version of the path on trunk...
+        repos.delete_path(svn_trunk_path)
+        # ...and copy the new version over from branch:
+        repos.copy_path(
+            cvs_rev.get_svn_path(), svn_trunk_path,
+            self._motivating_revnum, True
+            )
+      elif isinstance(cvs_rev, CVSRevisionDelete):
+        # Delete trunk path:
+        repos.delete_path(svn_trunk_path)
+      elif isinstance(cvs_rev, CVSRevisionNoop):
+        # Do nothing
+        pass
+      else:
+        raise InternalError('Unexpected CVSRevision type: %s' % (cvs_rev,))
 
-    self.cvs_symbol_ids = cvs_symbol_ids
+    repos.end_commit()
 
   def __getstate__(self):
     return (
-        SVNCommit.__getstate__(self),
-        self.symbol.id, self.cvs_symbol_ids,
-        )
+        self.revnum, self._motivating_revnum, self.date,
+        SVNRevisionCommit.__getstate__(self),)
 
   def __setstate__(self, state):
-    (svn_commit_state, symbol_id, self.cvs_symbol_ids) = state
-    SVNCommit.__setstate__(self, svn_commit_state)
-    self.symbol = Ctx()._symbol_db.get_symbol(symbol_id)
+    (revnum, motivating_revnum, date, rev_state,) = state
+    SVNCommit.__init__(self, "Retrieved from disk", date, revnum)
+    SVNRevisionCommit.__setstate__(self, rev_state)
 
-  def get_cvs_items(self):
-    return [
-        cvs_symbol
-        for (id, cvs_symbol)
-            in Ctx()._cvs_items_db.get_many(self.cvs_symbol_ids)
-        ]
-
-  def _get_symbol_type(self):
-    """Return the type of the self.symbol ('branch' or 'tag')."""
-
-    raise NotImplementedError()
-
-  def get_author(self):
-    return Ctx().username
-
-  def get_log_msg(self):
-    """Return a manufactured log message for this commit."""
-
-    # In Python 2.2.3, we could use textwrap.fill().  Oh well :-).
-    space_or_newline = ' '
-    cleaned_symbolic_name = self.symbol.get_clean_name()
-    if len(cleaned_symbolic_name) >= 13:
-      space_or_newline = '\n'
-
-    return (
-        "This commit was manufactured by cvs2svn to create %s%s'%s'."
-        % (self._get_symbol_type(), space_or_newline, cleaned_symbolic_name)
-        )
-
-  def get_description(self):
-    return 'copying to %s %r' % (self._get_symbol_type(), self.symbol.name,)
-
-  def __str__(self):
-    """ Print a human-readable description of this SVNCommit.
-
-    This description is not intended to be machine-parseable."""
-
-    return (
-        SVNCommit.__str__(self)
-        + "   symbolic name: %s\n" % self.symbol.get_clean_name())
-
-
-class SVNBranchCommit(SVNSymbolCommit):
-  def __init__(self, symbol, cvs_symbol_ids, date, revnum):
-    if not isinstance(symbol, Branch):
-      raise InternalError('Incorrect symbol type %r' % (symbol,))
-
-    SVNSymbolCommit.__init__(self, symbol, cvs_symbol_ids, date, revnum)
-
-  def _get_symbol_type(self):
-    return 'branch'
-
-  def output(self, output_option):
-    output_option.process_branch_commit(self)
-
-
-class SVNTagCommit(SVNSymbolCommit):
-  def __init__(self, symbol, cvs_symbol_ids, date, revnum):
-    if not isinstance(symbol, Tag):
-      raise InternalError('Incorrect symbol type %r' % (symbol,))
-
-    SVNSymbolCommit.__init__(self, symbol, cvs_symbol_ids, date, revnum)
-
-  def _get_symbol_type(self):
-    return 'tag'
-
-  def output(self, output_option):
-    output_option.process_tag_commit(self)
+    self._motivating_revnum = motivating_revnum
 
 

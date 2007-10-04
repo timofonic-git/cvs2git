@@ -56,20 +56,12 @@ from __future__ import generators
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib.set_support import *
 from cvs2svn_lib.context import Ctx
-from cvs2svn_lib.symbol import Trunk
 
 
 class CVSItem(object):
-  __slots__ = [
-      'id',
-      'cvs_file',
-      'revision_recorder_token',
-      ]
-
-  def __init__(self, id, cvs_file, revision_recorder_token):
+  def __init__(self, id, cvs_file):
     self.id = id
     self.cvs_file = cvs_file
-    self.revision_recorder_token = revision_recorder_token
 
   def __eq__(self, other):
     return self.id == other.id
@@ -128,15 +120,6 @@ class CVSItem(object):
 
     raise NotImplementedError()
 
-  def check_links(self, cvs_file_items):
-    """Check for consistency of links to other CVSItems.
-
-    Other items can be looked up in CVS_FILE_ITEMS, which is an
-    instance of CVSFileItems.  Raise an AssertionError if there is a
-    problem."""
-
-    raise NotImplementedError()
-
   def __repr__(self):
     return '%s(%s)' % (self.__class__.__name__, self,)
 
@@ -161,12 +144,14 @@ class CVSRevision(CVSItem):
     LOD -- (LineOfDevelopment) LOD on which this revision occurred.
     FIRST_ON_BRANCH_ID -- (int or None) if this revision is the first on its
         branch, the cvs_branch_id of that branch; else, None.
-    NTDBR -- (bool) true iff this is a non-trunk default branch revision.
-    NTDBR_PREV_ID -- (int or None) Iff this is the 1.2 revision after the end
-        of a default branch, the id of the last rev on the default branch;
+    DEFAULT_BRANCH_REVISION -- (bool) true iff this is a default branch
+        revision.
+    DEFAULT_BRANCH_PREV_ID -- (int or None) Iff this is the 1.2 revision after
+        the end of a default branch, the id of the last rev on the default
+        branch; else, None.
+    DEFAULT_BRANCH_NEXT_ID -- (int or None) Iff this is the last revision on
+        a default branch preceding a 1.2 rev, the id of the 1.2 revision;
         else, None.
-    NTDBR_NEXT_ID -- (int or None) Iff this is the last revision on a default
-        branch preceding a 1.2 rev, the id of the 1.2 revision; else, None.
     TAG_IDS -- (list of int) ids of all CVSTags rooted at this CVSRevision.
     BRANCH_IDS -- (list of int) ids of all CVSBranches rooted at this
         CVSRevision.
@@ -183,37 +168,18 @@ class CVSRevision(CVSItem):
 
   """
 
-  __slots__ = [
-      'timestamp',
-      'metadata_id',
-      'prev_id',
-      'next_id',
-      'rev',
-      'deltatext_exists',
-      'lod',
-      'first_on_branch_id',
-      'ntdbr',
-      'ntdbr_prev_id',
-      'ntdbr_next_id',
-      'tag_ids',
-      'branch_ids',
-      'branch_commit_ids',
-      'opened_symbols',
-      'closed_symbols',
-      ]
-
   def __init__(self,
                id, cvs_file,
                timestamp, metadata_id,
                prev_id, next_id,
                rev, deltatext_exists,
-               lod, first_on_branch_id, ntdbr,
-               ntdbr_prev_id, ntdbr_next_id,
+               lod, first_on_branch_id, default_branch_revision,
+               default_branch_prev_id, default_branch_next_id,
                tag_ids, branch_ids, branch_commit_ids,
                revision_recorder_token):
     """Initialize a new CVSRevision object."""
 
-    CVSItem.__init__(self, id, cvs_file, revision_recorder_token)
+    CVSItem.__init__(self, id, cvs_file)
 
     self.timestamp = timestamp
     self.metadata_id = metadata_id
@@ -223,14 +189,15 @@ class CVSRevision(CVSItem):
     self.deltatext_exists = deltatext_exists
     self.lod = lod
     self.first_on_branch_id = first_on_branch_id
-    self.ntdbr = ntdbr
-    self.ntdbr_prev_id = ntdbr_prev_id
-    self.ntdbr_next_id = ntdbr_next_id
+    self.default_branch_revision = default_branch_revision
+    self.default_branch_prev_id = default_branch_prev_id
+    self.default_branch_next_id = default_branch_next_id
     self.tag_ids = tag_ids
     self.branch_ids = branch_ids
     self.branch_commit_ids = branch_commit_ids
     self.opened_symbols = None
     self.closed_symbols = None
+    self.revision_recorder_token = revision_recorder_token
 
   def _get_cvs_path(self):
     return self.cvs_file.cvs_path
@@ -254,8 +221,8 @@ class CVSRevision(CVSItem):
         self.deltatext_exists,
         self.lod.id,
         self.first_on_branch_id,
-        self.ntdbr,
-        self.ntdbr_prev_id, self.ntdbr_next_id,
+        self.default_branch_revision,
+        self.default_branch_prev_id, self.default_branch_next_id,
         self.tag_ids, self.branch_ids, self.branch_commit_ids,
         self.opened_symbols, self.closed_symbols,
         self.revision_recorder_token,
@@ -269,24 +236,13 @@ class CVSRevision(CVSItem):
      self.deltatext_exists,
      lod_id,
      self.first_on_branch_id,
-     self.ntdbr,
-     self.ntdbr_prev_id, self.ntdbr_next_id,
+     self.default_branch_revision,
+     self.default_branch_prev_id, self.default_branch_next_id,
      self.tag_ids, self.branch_ids, self.branch_commit_ids,
      self.opened_symbols, self.closed_symbols,
      self.revision_recorder_token) = data
     self.cvs_file = Ctx()._cvs_file_db.get_file(cvs_file_id)
     self.lod = Ctx()._symbol_db.get_symbol(lod_id)
-
-  def get_effective_prev_id(self):
-    """Return the ID of the effective predecessor of this item.
-
-    This is the ID of the item that determines whether the object
-    existed before this CVSRevision."""
-
-    if self.ntdbr_prev_id is not None:
-      return self.ntdbr_prev_id
-    else:
-      return self.prev_id
 
   def get_symbol_pred_ids(self):
     """Return the pred_ids for symbol predecessors."""
@@ -300,8 +256,8 @@ class CVSRevision(CVSItem):
     retval = self.get_symbol_pred_ids()
     if self.prev_id is not None:
       retval.add(self.prev_id)
-    if self.ntdbr_prev_id is not None:
-      retval.add(self.ntdbr_prev_id)
+    if self.default_branch_prev_id is not None:
+      retval.add(self.default_branch_prev_id)
     return retval
 
   def get_symbol_succ_ids(self):
@@ -316,8 +272,8 @@ class CVSRevision(CVSItem):
     retval = self.get_symbol_succ_ids()
     if self.next_id is not None:
       retval.add(self.next_id)
-    if self.ntdbr_next_id is not None:
-      retval.add(self.ntdbr_next_id)
+    if self.default_branch_next_id is not None:
+      retval.add(self.default_branch_next_id)
     for id in self.branch_commit_ids:
       retval.add(id)
     return retval
@@ -383,11 +339,11 @@ class CVSRevision(CVSItem):
       # The first CVSRevision on a branch is considered to close the
       # branch:
       yield self.first_on_branch_id
-      if self.ntdbr:
+      if self.default_branch_revision:
         # If the 1.1 revision was not deleted, the 1.1.1.1 revision is
         # considered to close it:
         yield self.prev_id
-    elif self.ntdbr_prev_id is not None:
+    elif self.default_branch_prev_id is not None:
       # This is the special case of a 1.2 revision that follows a
       # non-trunk default branch.  Either 1.1 was deleted or the first
       # default branch revision closed 1.1, so we don't have to close
@@ -401,65 +357,6 @@ class CVSRevision(CVSItem):
       # prev_id is on the same LOD and this item closes that one:
       yield self.prev_id
 
-  def check_links(self, cvs_file_items):
-    assert self.cvs_file == cvs_file_items.cvs_file
-
-    prev = cvs_file_items.get(self.prev_id)
-    next = cvs_file_items.get(self.next_id)
-    first_on_branch = cvs_file_items.get(self.first_on_branch_id)
-    ntdbr_next = cvs_file_items.get(self.ntdbr_next_id)
-    ntdbr_prev = cvs_file_items.get(self.ntdbr_prev_id)
-    effective_prev = cvs_file_items.get(self.get_effective_prev_id())
-
-    if prev is None:
-      # This is the first CVSRevision on trunk or a detached branch:
-      assert self.id in cvs_file_items.root_ids
-    elif first_on_branch is not None:
-      # This is the first CVSRevision on an existing branch:
-      assert isinstance(first_on_branch, CVSBranch)
-      assert first_on_branch.symbol == self.lod
-      assert first_on_branch.next_id == self.id
-      assert first_on_branch.source_id == prev.id
-      assert self.id in prev.branch_commit_ids
-    else:
-      # This revision follows another revision on the same LOD:
-      assert prev.next_id == self.id
-      assert prev.lod == self.lod
-
-    if next is not None:
-      assert next.prev_id == self.id
-      assert next.lod == self.lod
-
-    if ntdbr_next is not None:
-      assert self.ntdbr
-      assert ntdbr_next.ntdbr_prev_id == self.id
-
-    if ntdbr_prev is not None:
-      assert ntdbr_prev.ntdbr_next_id == self.id
-
-    for tag_id in self.tag_ids:
-      tag = cvs_file_items[tag_id]
-      assert isinstance(tag, CVSTag)
-      assert tag.source_id == self.id
-      assert tag.source_lod == self.lod
-
-    branch_commit_ids = list(self.branch_commit_ids)
-    for branch_id in self.branch_ids:
-      branch = cvs_file_items[branch_id]
-      assert isinstance(branch, CVSBranch)
-      assert branch.source_id == self.id
-      assert branch.source_lod == self.lod
-      if branch.next_id is not None:
-        assert branch.next_id in branch_commit_ids
-        branch_commit_ids.remove(branch.next_id)
-    assert not branch_commit_ids
-
-    assert self.__class__ == cvs_revision_type_map[(
-        isinstance(self, CVSRevisionModification),
-        effective_prev is not None
-            and isinstance(effective_prev, CVSRevisionModification),
-        )]
-
   def __str__(self):
     """For convenience only.  The format is subject to change at any time."""
 
@@ -468,12 +365,6 @@ class CVSRevision(CVSItem):
 
 class CVSRevisionModification(CVSRevision):
   """Base class for CVSRevisionAdd or CVSRevisionChange."""
-
-  __slots__ = []
-
-  # Explicitly define pickle methods to get around a Python 2.2 bug:
-  __setstate__ = CVSRevision.__setstate__
-  __getstate__ = CVSRevision.__getstate__
 
   def get_cvs_symbol_ids_opened(self):
     return self.tag_ids + self.branch_ids
@@ -485,31 +376,17 @@ class CVSRevisionAdd(CVSRevisionModification):
   The file might have never existed on this LOD, or it might have
   existed previously but been deleted by a CVSRevisionDelete."""
 
-  __slots__ = []
-
-  # Explicitly define pickle methods to get around a Python 2.2 bug:
-  __setstate__ = CVSRevisionModification.__setstate__
-  __getstate__ = CVSRevisionModification.__getstate__
+  pass
 
 
 class CVSRevisionChange(CVSRevisionModification):
   """A CVSRevision that modifies a file that already existed on this LOD."""
 
-  __slots__ = []
-
-  # Explicitly define pickle methods to get around a Python 2.2 bug:
-  __setstate__ = CVSRevisionModification.__setstate__
-  __getstate__ = CVSRevisionModification.__getstate__
+  pass
 
 
 class CVSRevisionAbsent(CVSRevision):
   """A CVSRevision for which the file is nonexistent on this LOD."""
-
-  __slots__ = []
-
-  # Explicitly define pickle methods to get around a Python 2.2 bug:
-  __setstate__ = CVSRevision.__setstate__
-  __getstate__ = CVSRevision.__getstate__
 
   def get_cvs_symbol_ids_opened(self):
     return []
@@ -518,11 +395,7 @@ class CVSRevisionAbsent(CVSRevision):
 class CVSRevisionDelete(CVSRevisionAbsent):
   """A CVSRevision that deletes a file that existed on this LOD."""
 
-  __slots__ = []
-
-  # Explicitly define pickle methods to get around a Python 2.2 bug:
-  __setstate__ = CVSRevisionAbsent.__setstate__
-  __getstate__ = CVSRevisionAbsent.__getstate__
+  pass
 
 
 class CVSRevisionNoop(CVSRevisionAbsent):
@@ -534,11 +407,7 @@ class CVSRevisionNoop(CVSRevisionAbsent):
   they might have a nontrivial log message that we don't want to throw
   away."""
 
-  __slots__ = []
-
-  # Explicitly define pickle methods to get around a Python 2.2 bug:
-  __setstate__ = CVSRevisionAbsent.__setstate__
-  __getstate__ = CVSRevisionAbsent.__getstate__
+  pass
 
 
 # A map
@@ -569,24 +438,13 @@ class CVSSymbol(CVSItem):
         CVSSymbol.
     SOURCE_ID -- (int) the ID of the CVSRevision or CVSBranch that is the
         source for this item.
-    REVISION_RECORDER_TOKEN -- (arbitrary) a token that can be set by
-        RevisionRecorder for the later use of RevisionReader.
 
   """
 
-  __slots__ = [
-      'symbol',
-      'source_lod',
-      'source_id',
-      ]
-
-  def __init__(
-      self, id, cvs_file, symbol, source_lod, source_id,
-      revision_recorder_token
-      ):
+  def __init__(self, id, cvs_file, symbol, source_lod, source_id):
     """Initialize a CVSSymbol object."""
 
-    CVSItem.__init__(self, id, cvs_file, revision_recorder_token)
+    CVSItem.__init__(self, id, cvs_file)
 
     self.symbol = symbol
     self.source_lod = source_lod
@@ -622,30 +480,16 @@ class CVSBranch(CVSSymbol):
     OPENED_SYMBOLS -- (None or list of (symbol_id, cvs_symbol_id) tuples)
         information about all CVSSymbols opened by this branch.  This member
         is set in FilterSymbolsPass; before then, it is None.
-    REVISION_RECORDER_TOKEN -- (arbitrary) a token that can be set by
-        RevisionRecorder for the later use of RevisionReader.
 
   """
 
-  __slots__ = [
-      'branch_number',
-      'next_id',
-      'tag_ids',
-      'branch_ids',
-      'opened_symbols',
-      ]
-
   def __init__(
       self, id, cvs_file, symbol, branch_number,
-      source_lod, source_id, next_id,
-      revision_recorder_token,
+      source_lod, source_id, next_id
       ):
     """Initialize a CVSBranch."""
 
-    CVSSymbol.__init__(
-        self, id, cvs_file, symbol, source_lod, source_id,
-        revision_recorder_token
-        )
+    CVSSymbol.__init__(self, id, cvs_file, symbol, source_lod, source_id)
     self.branch_number = branch_number
     self.next_id = next_id
     self.tag_ids = []
@@ -659,7 +503,6 @@ class CVSBranch(CVSSymbol):
         self.source_lod.id, self.source_id, self.next_id,
         self.tag_ids, self.branch_ids,
         self.opened_symbols,
-        self.revision_recorder_token,
         )
 
   def __setstate__(self, data):
@@ -668,8 +511,7 @@ class CVSBranch(CVSSymbol):
         symbol_id, self.branch_number,
         source_lod_id, self.source_id, self.next_id,
         self.tag_ids, self.branch_ids,
-        self.opened_symbols,
-        self.revision_recorder_token,
+        self.opened_symbols
         ) = data
     self.cvs_file = Ctx()._cvs_file_db.get_file(cvs_file_id)
     self.symbol = Ctx()._symbol_db.get_symbol(symbol_id)
@@ -687,35 +529,6 @@ class CVSBranch(CVSSymbol):
   def get_cvs_symbol_ids_opened(self):
     return self.tag_ids + self.branch_ids
 
-  def check_links(self, cvs_file_items):
-    source = cvs_file_items.get(self.source_id)
-    next = cvs_file_items.get(self.next_id)
-
-    assert self.id in source.branch_ids
-    if isinstance(source, CVSRevision):
-      assert self.source_lod == source.lod
-    elif isinstance(source, CVSBranch):
-      assert self.source_lod == source.symbol
-    else:
-      assert False
-
-    if next is not None:
-      assert isinstance(next, CVSRevision)
-      assert next.lod == self.symbol
-      assert next.first_on_branch_id == self.id
-
-    for tag_id in self.tag_ids:
-      tag = cvs_file_items[tag_id]
-      assert isinstance(tag, CVSTag)
-      assert tag.source_id == self.id
-      assert tag.source_lod == self.symbol
-
-    for branch_id in self.branch_ids:
-      branch = cvs_file_items[branch_id]
-      assert isinstance(branch, CVSBranch)
-      assert branch.source_id == self.id
-      assert branch.source_lod == self.symbol
-
   def __str__(self):
     """For convenience only.  The format is subject to change at any time."""
 
@@ -725,12 +538,6 @@ class CVSBranch(CVSSymbol):
 
 class CVSBranchNoop(CVSBranch):
   """A CVSBranch whose source is a CVSRevisionAbsent."""
-
-  __slots__ = []
-
-  # Explicitly define pickle methods to get around a Python 2.2 bug:
-  __setstate__ = CVSBranch.__setstate__
-  __getstate__ = CVSBranch.__getstate__
 
   def get_cvs_symbol_ids_opened(self):
     return []
@@ -760,36 +567,22 @@ class CVSTag(CVSSymbol):
         CVSSymbol.
     SOURCE_ID -- (int) the ID of the CVSRevision or CVSBranch that is being
         tagged.
-    REVISION_RECORDER_TOKEN -- (arbitrary) a token that can be set by
-        RevisionRecorder for the later use of RevisionReader.
 
   """
 
-  __slots__ = []
-
-  def __init__(
-      self, id, cvs_file, symbol, source_lod, source_id,
-      revision_recorder_token,
-      ):
+  def __init__(self, id, cvs_file, symbol, source_lod, source_id):
     """Initialize a CVSTag."""
 
-    CVSSymbol.__init__(
-        self, id, cvs_file, symbol, source_lod, source_id,
-        revision_recorder_token,
-        )
+    CVSSymbol.__init__(self, id, cvs_file, symbol, source_lod, source_id)
 
   def __getstate__(self):
     return (
         self.id, self.cvs_file.id, self.symbol.id,
         self.source_lod.id, self.source_id,
-        self.revision_recorder_token,
         )
 
   def __setstate__(self, data):
-    (
-        self.id, cvs_file_id, symbol_id, source_lod_id, self.source_id,
-        self.revision_recorder_token,
-        ) = data
+    (self.id, cvs_file_id, symbol_id, source_lod_id, self.source_id) = data
     self.cvs_file = Ctx()._cvs_file_db.get_file(cvs_file_id)
     self.symbol = Ctx()._symbol_db.get_symbol(symbol_id)
     self.source_lod = Ctx()._symbol_db.get_symbol(source_lod_id)
@@ -803,17 +596,6 @@ class CVSTag(CVSSymbol):
   def get_cvs_symbol_ids_opened(self):
     return []
 
-  def check_links(self, cvs_file_items):
-    source = cvs_file_items.get(self.source_id)
-
-    assert self.id in source.tag_ids
-    if isinstance(source, CVSRevision):
-      assert self.source_lod == source.lod
-    elif isinstance(source, CVSBranch):
-      assert self.source_lod == source.symbol
-    else:
-      assert False
-
   def __str__(self):
     """For convenience only.  The format is subject to change at any time."""
 
@@ -824,11 +606,7 @@ class CVSTag(CVSSymbol):
 class CVSTagNoop(CVSTag):
   """A CVSTag whose source is a CVSRevisionAbsent."""
 
-  __slots__ = []
-
-  # Explicitly define pickle methods to get around a Python 2.2 bug:
-  __setstate__ = CVSTag.__setstate__
-  __getstate__ = CVSTag.__getstate__
+  pass
 
 
 # A map

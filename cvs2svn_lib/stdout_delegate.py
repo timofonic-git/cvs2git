@@ -42,12 +42,6 @@ class StdoutDelegate(SVNRepositoryMirrorDelegate):
   def end_commit(self):
     pass
 
-  def initialize_project(self, project):
-    Log().verbose("  Initializing project %s" % (project,))
-
-  def initialize_lod(self, lod):
-    Log().verbose("  Initializing %s" % (lod,))
-
   def mkdir(self, path):
     """Print a line stating that we are creating directory PATH."""
 
@@ -62,6 +56,9 @@ class StdoutDelegate(SVNRepositoryMirrorDelegate):
     """Print a line stating what path we are 'changing'."""
 
     Log().verbose("  Changing", s_item.cvs_rev.get_svn_path())
+
+  def skip_path(self, cvs_rev):
+    pass
 
   def delete_path(self, path):
     """Print a line stating that we are 'deleting' PATH."""

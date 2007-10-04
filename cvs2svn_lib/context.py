@@ -42,8 +42,6 @@ class Ctx:
 
     self.output_option = None
     self.dry_run = False
-    self.revision_recorder = None
-    self.revision_excluder = None
     self.revision_reader = None
     self.svnadmin_executable = config.SVNADMIN_EXECUTABLE
     self.sort_executable = config.SORT_EXECUTABLE
@@ -51,16 +49,23 @@ class Ctx:
     self.prune = True
     self.utf8_encoder = lambda s: s.decode('ascii').encode('utf8')
     self.filename_utf8_encoder = lambda s: s.decode('ascii').encode('utf8')
-    self.decode_apple_single = False
-    self.symbol_strategy_rules = []
-    self.symbol_info_filename = None
+    self.symbol_strategy = None
     self.username = None
     self.svn_property_setters = []
     self.tmpdir = 'cvs2svn-tmp'
     self.skip_cleanup = False
+    # A list of Project instances for all projects being converted.
+    self.projects = []
     self.cross_project_commits = True
     self.cross_branch_commits = True
     self.retain_conflicting_attic_files = False
+
+  def add_project(self, project):
+    """Add a project to be converted."""
+
+    assert project.id is None
+    project.id = len(self.projects)
+    self.projects.append(project)
 
   def get_temp_filename(self, basename):
     return os.path.join(self.tmpdir, basename)

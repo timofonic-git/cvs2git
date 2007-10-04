@@ -38,33 +38,7 @@ it is possible that a Symbol, Branch, and Tag instance all have the
 same id, in which case they are all considered equal.
 
 Trunk instances do not have ids, but Trunk objects can be compared to
-Symbol objects (trunks always compare less than symbols).
-
-The classes in this module are organized into two overlapping class
-hierarchies as follows:
-
-LineOfDevelopment
-  |
-  +--Trunk
-  |
-  +--IncludedSymbol (also inherits from TypedSymbol)
-       |
-       +--Branch
-       |
-       +--Tag
-
-Symbol
-  |
-  +--TypedSymbol
-       |
-       +--IncludedSymbol (also inherits from LineOfDevelopment)
-       |    |
-       |    +--Branch
-       |    |
-       |    +--Tag
-       |
-       +--ExcludedSymbol
-"""
+Symbol objects (trunks always compare less than symbols)."""
 
 
 from cvs2svn_lib.boolean import *
@@ -93,7 +67,7 @@ class Trunk(LineOfDevelopment):
 
   def __setstate__(self, state):
     (self.id, project_id,) = state
-    self.project = Ctx()._projects[project_id]
+    self.project = Ctx().projects[project_id]
 
   def __eq__(self, other):
     return isinstance(other, Trunk) and self.project == other.project
@@ -121,7 +95,7 @@ class Trunk(LineOfDevelopment):
 
 
 class Symbol:
-  def __init__(self, id, project, name, preferred_parent_id=None):
+  def __init__(self, id, project, name):
     self.id = id
     self.project = project
     self.name = name
@@ -132,14 +106,14 @@ class Symbol:
     # all of the branches on this LOD have been detached from the
     # dependency tree), then this field is set to None.  This field is
     # set during FilterSymbolsPass.
-    self.preferred_parent_id = preferred_parent_id
+    self.preferred_parent_id = None
 
   def __getstate__(self):
     return (self.id, self.project.id, self.name, self.preferred_parent_id,)
 
   def __setstate__(self, state):
     (self.id, project_id, self.name, self.preferred_parent_id,) = state
-    self.project = Ctx()._projects[project_id]
+    self.project = Ctx().projects[project_id]
 
   def __eq__(self, other):
     return isinstance(other, Symbol) and self.id == other.id
@@ -180,10 +154,7 @@ class TypedSymbol(Symbol):
   """A Symbol whose type (branch, tag, or excluded) has been decided."""
 
   def __init__(self, symbol):
-    Symbol.__init__(
-        self, symbol.id, symbol.project, symbol.name,
-        symbol.preferred_parent_id,
-        )
+    Symbol.__init__(self, symbol.id, symbol.project, symbol.name)
 
 
 class IncludedSymbol(TypedSymbol, LineOfDevelopment):

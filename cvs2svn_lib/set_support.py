@@ -36,20 +36,10 @@ except NameError:
     from sets import Set as set
   except ImportError:
     # We have to roll our own:
-    class set(object):
-      __slots__ = ['_dict']
-
+    class set:
       def __init__(self, iterable=()):
-        self._dict = {}
+        self._dict = { }
         for value in iterable:
-          self._dict[value] = None
-
-      def __getstate__(self):
-        return (self._dict.keys(),)
-
-      def __setstate__(self, state):
-        self._dict = {}
-        for value in state[0]:
           self._dict[value] = None
 
       def __len__(self):
@@ -112,18 +102,10 @@ except NameError:
       def __ior__(self, other):
         return self.update(other)
 
-      def __or__(self, other):
-        if len(self) <= len(other):
-          s1, s2 = self, other
-        else:
-          s1, s2 = other, self
-
-        retval = set(s1)
-        retval |= s2
-
-        return retval
-
       def __repr__(self):
         return 'Set(%r)' % (self._dict.keys(),)
+
+      def __getinitargs__(self):
+        return (self._dict.keys(),)
 
 

@@ -52,7 +52,6 @@ from __future__ import generators
 
 import sys
 import os
-import stat
 import re
 import time
 
@@ -63,21 +62,16 @@ from cvs2svn_lib.common import DB_OPEN_NEW
 from cvs2svn_lib.common import FatalError
 from cvs2svn_lib.common import warning_prefix
 from cvs2svn_lib.common import error_prefix
-from cvs2svn_lib.common import verify_svn_filename_legal
-from cvs2svn_lib.common import path_split
 from cvs2svn_lib.log import Log
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.artifact_manager import artifact_manager
 from cvs2svn_lib.project import FileInAndOutOfAtticException
-from cvs2svn_lib.cvs_file import CVSPath
-from cvs2svn_lib.cvs_file import CVSDirectory
 from cvs2svn_lib.cvs_file import CVSFile
 from cvs2svn_lib.symbol import Symbol
 from cvs2svn_lib.symbol import Trunk
 from cvs2svn_lib.cvs_item import CVSBranch
 from cvs2svn_lib.cvs_item import CVSTag
 from cvs2svn_lib.cvs_item import cvs_revision_type_map
-from cvs2svn_lib.cvs_file_items import VendorBranchError
 from cvs2svn_lib.cvs_file_items import CVSFileItems
 from cvs2svn_lib.key_generator import KeyGenerator
 from cvs2svn_lib.cvs_item_database import NewCVSItemStore
@@ -105,22 +99,15 @@ def rev_tuple(rev):
 
 
 def is_trunk_revision(rev):
-  """Return True iff REV is a trunk revision.
-
-  REV is a revision number corresponding to a specific revision (i.e.,
-  not a whole branch)."""
+  """Return True iff REV is a trunk revision."""
 
   return rev.count('.') == 1
 
 
-def is_branch_revision_number(rev):
-  """Return True iff REV is a branch revision number.
+def is_branch_revision(rev):
+  """Return True iff REV is a branch revision."""
 
-  REV is a CVS revision number in canonical form (i.e., with zeros
-  removed).  Return True iff it refers to a whole branch, as opposed
-  to a single revision."""
-
-  return rev.count('.') % 2 == 0
+  return rev.count('.') >= 3
 
 
 def is_same_line_of_development(rev1, rev2):
@@ -195,6 +182,27 @@ class _RevisionData:
     # revision.
     self.tags_data = []
 
+    # The id of the metadata record associated with this revision.
+    self.metadata_id = None
+
+    # True iff this revision was the head revision on a default branch
+    # at some point (as best we can determine).
+    self.non_trunk_default_branch_revision = False
+
+    # Iff this is the 1.2 revision at which a non-trunk default branch
+    # revision was ended, store the number of the last revision on
+    # the default branch here.
+    self.default_branch_prev = None
+
+    # Iff this is the last revision of a non-trunk default branch, and
+    # the branch is followed by a 1.2 revision, then this holds the
+    # number of the 1.2 revision (namely, '1.2').
+    self.default_branch_next = None
+
+    # A boolean value indicating whether deltatext was associated with
+    # this revision.
+    self.deltatext_exists = None
+
     # A token that may be returned from
     # RevisionRecorder.record_text().  It can be used by
     # RevisionReader to obtain the text again.
@@ -260,13 +268,9 @@ class _SymbolDataCollector(object):
     self.pdc = self.fdc.pdc
     self.collect_data = self.fdc.collect_data
 
-    # A list [(name, revision), ...] of symbols defined in the header
-    # of the file.  The name has already been transformed using the
-    # symbol transform rules.  If the symbol transform rules indicate
-    # that the symbol should be ignored, then it is never added to
-    # this list.  This list is processed then deleted in
-    # process_symbols().
-    self._symbol_defs = []
+    # A set containing the names of each known symbol in this file,
+    # used to check for duplicates.
+    self._known_symbols = set()
 
     # Map { branch_number : _BranchData }, where branch_number has an
     # odd number of digits.
@@ -299,7 +303,7 @@ class _SymbolDataCollector(object):
 
     symbol = self.pdc.get_symbol(name)
     branch_data = _BranchData(
-        self.collect_data.item_key_generator.gen_id(), symbol, branch_number
+        self.collect_data.key_generator.gen_id(), symbol, branch_number
         )
     self.branches_data[branch_number] = branch_data
     return branch_data
@@ -313,88 +317,39 @@ class _SymbolDataCollector(object):
 
     symbol = self.pdc.get_symbol(name)
     tag_data = _TagData(
-        self.collect_data.item_key_generator.gen_id(), symbol, revision
+        self.collect_data.key_generator.gen_id(), symbol, revision
         )
     self.tags_data.setdefault(revision, []).append(tag_data)
     return tag_data
 
   def define_symbol(self, name, revision):
-    """Record a symbol definition for later processing."""
+    """Record a symbol called NAME, which is associated with REVISON.
 
-    # Canonicalize the revision number:
-    revision = branch_tag_re.sub(r'\1\2', revision)
+    REVISION is an unprocessed revision number from the RCS file's
+    header, for example: '1.7', '1.7.0.2', or '1.1.1' or '1.1.1.1'.
+    NAME is an untransformed branch or tag name.  This function will
+    determine by inspection whether it is a branch or a tag, and
+    record it in the right places."""
 
-    name = self.cvs_file.project.transform_symbol(
-        self.cvs_file, name, revision
-        )
+    name = self.cvs_file.project.transform_symbol(self.cvs_file, name)
 
-    # If the name transformed to None, then we ignore it:
-    if name is not None:
-      # Record it for later processing:
-      self._symbol_defs.append( (name, revision) )
+    # Check that the symbol is not already defined, which can easily
+    # happen when --symbol-transform is used:
+    if name in self._known_symbols:
+      self.collect_data.record_fatal_error(
+          "Multiple definitions of the symbol '%s' in '%s'"
+          % (name, self.cvs_file.filename)
+          )
+      return
 
-  def _process_duplicate_defs(self):
-    """Look for and process duplicate names in SELF._symbol_defs.
+    self._known_symbols.add(name)
 
-    Duplicate definitions of symbol names have been seen in the wild,
-    and they can also happen when --symbol-transform is used."""
-
-    # A map {name : [index,...]} mapping the names of symbols to a
-    # list of their definitions' indexes in self._symbol_defs:
-    known_symbols = {}
-
-    for i in range(len(self._symbol_defs)):
-      (name, revision) = self._symbol_defs[i]
-      if name in known_symbols:
-        known_symbols[name].append(i)
-      else:
-        known_symbols[name] = [i]
-
-    names = known_symbols.keys()
-    names.sort()
-    dup_indexes = set()
-    for name in names:
-      indexes = known_symbols[name]
-      if len(indexes) > 1:
-        # This symbol was defined multiple times.
-        self.collect_data.record_fatal_error(
-            "Multiple definitions of the symbol '%s' in '%s': %s" % (
-                name, self.cvs_file.filename,
-                ', '.join([self._symbol_defs[i][1] for i in indexes]),
-                )
-            )
-        # Ignore all but the last definition for now, to allow the
-        # conversion to proceed:
-        dup_indexes.update(indexes[:-1])
-
-    self._symbol_defs = [
-        self._symbol_defs[i]
-        for i in range(len(self._symbol_defs))
-        if i not in dup_indexes
-        ]
-
-  def _process_symbol(self, name, revision):
-    """Process a symbol called NAME, which is associated with REVISON.
-
-    REVISION is a canonical revision number with zeros removed, for
-    example: '1.7', '1.7.2', or '1.1.1' or '1.1.1.1'.  NAME is a
-    transformed branch or tag name."""
-
-    # Add symbol to our records:
-    if is_branch_revision_number(revision):
-      self._add_branch(name, revision)
+    # Determine whether it is a branch or tag, then add it:
+    m = branch_tag_re.match(revision)
+    if m:
+      self._add_branch(name, m.group(1) + m.group(2))
     else:
       self._add_tag(name, revision)
-
-  def process_symbols(self):
-    """Process the symbol definitions from SELF._symbol_defs."""
-
-    self._process_duplicate_defs()
-
-    for (name, revision) in self._symbol_defs:
-      self._process_symbol(name, revision)
-
-    del self._symbol_defs
 
   def rev_to_branch_number(revision):
     """Return the branch_number of the branch on which REVISION lies.
@@ -461,6 +416,11 @@ class _FileDataCollector(cvs2svn_rcsparse.Sink):
     # line of development.
     self._primary_dependencies = []
 
+    # The revision number of the root revision in the dependency tree.
+    # This is usually '1.1', but could be something else due to
+    # cvsadmin -o
+    self._root_rev = None
+
     # If set, this is an RCS branch number -- rcsparse calls this the
     # "principal branch", but CVS and RCS refer to it as the "default
     # branch", so that's what we call it, even though the rcsparse API
@@ -470,6 +430,15 @@ class _FileDataCollector(cvs2svn_rcsparse.Sink):
     # True iff revision 1.1 of the file appears to have been imported
     # (as opposed to added normally).
     self._file_imported = False
+
+    # A list of rev_data for each revision, in the order that the
+    # corresponding set_revision_info() callback was called.  This
+    # information is collected while the file is being parsed then
+    # processed in _process_revision_data(), which is called by
+    # parse_completed().
+    self._revision_data = []
+
+    self.collect_data.revision_recorder.start_file(self.cvs_file)
 
   def _get_rev_id(self, revision):
     if revision is None:
@@ -496,7 +465,7 @@ class _FileDataCollector(cvs2svn_rcsparse.Sink):
   def admin_completed(self):
     """This is a callback method declared in Sink."""
 
-    self.sdc.process_symbols()
+    pass
 
   def define_revision(self, revision, timestamp, author, state,
                       branches, next):
@@ -525,7 +494,7 @@ class _FileDataCollector(cvs2svn_rcsparse.Sink):
 
     # Record basic information about the revision:
     rev_data = _RevisionData(
-        self.collect_data.item_key_generator.gen_id(),
+        self.collect_data.key_generator.gen_id(),
         revision, int(timestamp), author, state)
     self._rev_data[revision] = rev_data
 
@@ -626,12 +595,174 @@ class _FileDataCollector(cvs2svn_rcsparse.Sink):
           # The tag_data's rev has the tag as a child:
           parent_data.tags_data.append(tag_data)
 
+  def _determine_root_rev(self):
+    """Determine self.root_rev.
+
+    We use the fact that it is the only revision without a parent."""
+
+    for rev_data in self._rev_data.values():
+      if rev_data.parent is None:
+        assert self._root_rev is None
+        self._root_rev = rev_data.rev
+    assert self._root_rev is not None
+
+  def tree_completed(self):
+    """The revision tree has been parsed.
+
+    Analyze it for consistency and connect some loose ends.
+
+    This is a callback method declared in Sink."""
+
+    self._resolve_primary_dependencies()
+    self._resolve_branch_dependencies()
+    self._sort_branches()
+    self._resolve_tag_dependencies()
+    self._determine_root_rev()
+
   def _determine_operation(self, rev_data):
     prev_rev_data = self._rev_data.get(rev_data.parent)
-    return cvs_revision_type_map[(
+    type = cvs_revision_type_map[(
         rev_data.state != 'dead',
         prev_rev_data is not None and prev_rev_data.state != 'dead',
         )]
+
+    return type
+
+  def set_revision_info(self, revision, log, text):
+    """This is a callback method declared in Sink."""
+
+    rev_data = self._rev_data[revision]
+
+    if rev_data.metadata_id is not None:
+      # Users have reported problems with repositories in which the
+      # deltatext block for revision 1.1 appears twice.  It is not
+      # known whether this results from a CVS/RCS bug, or from botched
+      # hand-editing of the repository.  In any case, empirically, cvs
+      # and rcs both use the first version when checking out data, so
+      # that's what we will do.  (For the record: "cvs log" fails on
+      # such a file; "rlog" prints the log message from the first
+      # block and ignores the second one.)
+      Log().warn(
+          "%s: in '%s':\n"
+          "   Deltatext block for revision %s appeared twice;\n"
+          "   ignoring the second occurrence.\n"
+          % (warning_prefix, self.cvs_file.filename, revision,)
+          )
+      return
+
+    if is_branch_revision(revision):
+      branch_name = self.sdc.rev_to_branch_data(revision).symbol.name
+    else:
+      branch_name = None
+
+    rev_data.metadata_id = self.collect_data.metadata_db.get_key(
+        self.project, branch_name, rev_data.author, log)
+    rev_data.deltatext_exists = bool(text)
+
+    # If this is revision 1.1, determine whether the file appears to
+    # have been created via 'cvs add' instead of 'cvs import'.  The
+    # test is that the log message CVS uses for 1.1 in imports is
+    # "Initial revision\n" with no period.  (This fact helps determine
+    # whether this file might have had a default branch in the past.)
+    if revision == '1.1':
+      self._file_imported = (log == 'Initial revision\n')
+
+    self._revision_data.append(rev_data)
+
+    rev_data.revision_recorder_token = \
+        self.collect_data.revision_recorder.record_text(
+            self._rev_data, revision, log, text)
+
+  def _get_rev_1_2(self):
+    """Return the _RevisionData for the revision playing the role of '1.2'.
+
+    Return None if there is no such revision."""
+
+    rev_1_1 = self._rev_data[self._root_rev]
+    if rev_1_1.child is None:
+      return None
+    else:
+      return self._rev_data[rev_1_1.child]
+
+  def _get_ntdbr_ids(self):
+    """Determine whether there are any non-trunk default branch revisions.
+
+    If a non-trunk default branch is determined to have existed, yield
+    the _RevisionData.ids for all revisions that were once non-trunk
+    default revisions, in dependency order.
+
+    There are two cases to handle:
+
+    One case is simple.  The RCS file lists a default branch
+    explicitly in its header, such as '1.1.1'.  In this case, we know
+    that every revision on the vendor branch is to be treated as head
+    of trunk at that point in time.
+
+    But there's also a degenerate case.  The RCS file does not
+    currently have a default branch, yet we can deduce that for some
+    period in the past it probably *did* have one.  For example, the
+    file has vendor revisions 1.1.1.1 -> 1.1.1.96, all of which are
+    dated before 1.2, and then it has 1.1.1.97 -> 1.1.1.100 dated
+    after 1.2.  In this case, we should record 1.1.1.96 as the last
+    vendor revision to have been the head of the default branch."""
+
+    if self.default_branch:
+      # There is still a default branch; that means that all revisions
+      # on that branch get marked.
+
+      rev_1_2 = self._get_rev_1_2()
+      if rev_1_2 is not None:
+        self.collect_data.record_fatal_error(
+            'File has default branch=%s but also a revision %s'
+            % (self.default_branch, rev_1_2.rev,)
+            )
+        return
+
+      rev = self.sdc.branches_data[self.default_branch].child
+      while rev:
+        rev_data = self._rev_data[rev]
+        yield rev_data.cvs_rev_id
+        rev = rev_data.child
+
+    elif self._file_imported:
+      # No default branch, but the file appears to have been imported.
+      # So our educated guess is that all revisions on the '1.1.1'
+      # branch with timestamps prior to the timestamp of '1.2' were
+      # non-trunk default branch revisions.
+      #
+      # This really only processes standard '1.1.1.*'-style vendor
+      # revisions.  One could conceivably have a file whose default
+      # branch is 1.1.3 or whatever, or was that at some point in
+      # time, with vendor revisions 1.1.3.1, 1.1.3.2, etc.  But with
+      # the default branch gone now, we'd have no basis for assuming
+      # that the non-standard vendor branch had ever been the default
+      # branch anyway.
+      #
+      # Note that we rely on comparisons between the timestamps of the
+      # revisions on the vendor branch and that of revision 1.2, even
+      # though the timestamps might be incorrect due to clock skew.
+      # We could do a slightly better job if we used the changeset
+      # timestamps, as it is possible that the dependencies that went
+      # into determining those timestamps are more accurate.  But that
+      # would require an extra pass or two.
+      vendor_branch_data = self.sdc.branches_data.get('1.1.1')
+      if vendor_branch_data is not None:
+        rev_1_2 = self._get_rev_1_2()
+        if rev_1_2 is None:
+          rev_1_2_timestamp = None
+        else:
+          rev_1_2_timestamp = rev_1_2.timestamp
+
+        rev = vendor_branch_data.child
+
+        while rev:
+          rev_data = self._rev_data[rev]
+          if rev_1_2_timestamp is not None \
+                 and rev_data.timestamp >= rev_1_2_timestamp:
+            # That's the end of the once-default branch.
+            break
+          yield rev_data.cvs_rev_id
+          rev = rev_data.child
 
   def _get_cvs_revision(self, rev_data):
     """Create and return a CVSRevision for REV_DATA."""
@@ -655,21 +786,23 @@ class _FileDataCollector(cvs2svn_rcsparse.Sink):
 
     return revision_type(
         self._get_rev_id(rev_data.rev), self.cvs_file,
-        rev_data.timestamp, None,
+        rev_data.timestamp, rev_data.metadata_id,
         self._get_rev_id(rev_data.parent),
         self._get_rev_id(rev_data.child),
         rev_data.rev,
-        True,
+        rev_data.deltatext_exists,
         self.sdc.rev_to_lod(rev_data.rev),
         rev_data.get_first_on_branch_id(),
-        False, None, None,
+        rev_data.non_trunk_default_branch_revision,
+        self._get_rev_id(rev_data.default_branch_prev),
+        self._get_rev_id(rev_data.default_branch_next),
         tag_ids, branch_ids, branch_commit_ids,
         rev_data.revision_recorder_token)
 
   def _get_cvs_revisions(self):
     """Generate the CVSRevisions present in this file."""
 
-    for rev_data in self._rev_data.itervalues():
+    for rev_data in self._revision_data:
       yield self._get_cvs_revision(rev_data)
 
   def _get_cvs_branches(self):
@@ -682,7 +815,6 @@ class _FileDataCollector(cvs2svn_rcsparse.Sink):
           self.sdc.rev_to_lod(branch_data.parent),
           self._get_rev_id(branch_data.parent),
           self._get_rev_id(branch_data.child),
-          None,
           )
 
   def _get_cvs_tags(self):
@@ -694,78 +826,7 @@ class _FileDataCollector(cvs2svn_rcsparse.Sink):
             tag_data.id, self.cvs_file, tag_data.symbol,
             self.sdc.rev_to_lod(tag_data.rev),
             self._get_rev_id(tag_data.rev),
-            None,
             )
-
-  def tree_completed(self):
-    """The revision tree has been parsed.
-
-    Analyze it for consistency and connect some loose ends.
-
-    This is a callback method declared in Sink."""
-
-    self._resolve_primary_dependencies()
-    self._resolve_branch_dependencies()
-    self._sort_branches()
-    self._resolve_tag_dependencies()
-
-    # Compute the preliminary CVSFileItems for this file:
-    cvs_items = []
-    cvs_items.extend(self._get_cvs_revisions())
-    cvs_items.extend(self._get_cvs_branches())
-    cvs_items.extend(self._get_cvs_tags())
-    self._cvs_file_items = CVSFileItems(
-        self.cvs_file, self.pdc.trunk, cvs_items
-        )
-
-    if Log().is_on(Log.DEBUG):
-      self._cvs_file_items.check_link_consistency()
-
-    # Tell the revision recorder about the file dependency tree.
-    self.collect_data.revision_recorder.start_file(self._cvs_file_items)
-
-  def set_revision_info(self, revision, log, text):
-    """This is a callback method declared in Sink."""
-
-    rev_data = self._rev_data[revision]
-    cvs_rev = self._cvs_file_items[rev_data.cvs_rev_id]
-
-    if cvs_rev.metadata_id is not None:
-      # Users have reported problems with repositories in which the
-      # deltatext block for revision 1.1 appears twice.  It is not
-      # known whether this results from a CVS/RCS bug, or from botched
-      # hand-editing of the repository.  In any case, empirically, cvs
-      # and rcs both use the first version when checking out data, so
-      # that's what we will do.  (For the record: "cvs log" fails on
-      # such a file; "rlog" prints the log message from the first
-      # block and ignores the second one.)
-      Log().warn(
-          "%s: in '%s':\n"
-          "   Deltatext block for revision %s appeared twice;\n"
-          "   ignoring the second occurrence.\n"
-          % (warning_prefix, self.cvs_file.filename, revision,)
-          )
-      return
-
-    if is_trunk_revision(revision):
-      branch_name = None
-    else:
-      branch_name = self.sdc.rev_to_branch_data(revision).symbol.name
-
-    cvs_rev.metadata_id = self.collect_data.metadata_db.get_key(
-        self.project, branch_name, rev_data.author, log)
-    cvs_rev.deltatext_exists = bool(text)
-
-    # If this is revision 1.1, determine whether the file appears to
-    # have been created via 'cvs add' instead of 'cvs import'.  The
-    # test is that the log message CVS uses for 1.1 in imports is
-    # "Initial revision\n" with no period.  (This fact helps determine
-    # whether this file might have had a default branch in the past.)
-    if revision == '1.1':
-      self._file_imported = (log == 'Initial revision\n')
-
-    cvs_rev.revision_recorder_token = \
-        self.collect_data.revision_recorder.record_text(cvs_rev, log, text)
 
   def parse_completed(self):
     """Finish the processing of this file.
@@ -774,82 +835,44 @@ class _FileDataCollector(cvs2svn_rcsparse.Sink):
 
     pass
 
-  def _process_ntdbrs(self):
-    """Fix up any non-trunk default branch revisions (if present).
-
-    If a non-trunk default branch is determined to have existed, yield
-    the _RevisionData.ids for all revisions that were once non-trunk
-    default revisions, in dependency order.
-
-    There are two cases to handle:
-
-    One case is simple.  The RCS file lists a default branch
-    explicitly in its header, such as '1.1.1'.  In this case, we know
-    that every revision on the vendor branch is to be treated as head
-    of trunk at that point in time.
-
-    But there's also a degenerate case.  The RCS file does not
-    currently have a default branch, yet we can deduce that for some
-    period in the past it probably *did* have one.  For example, the
-    file has vendor revisions 1.1.1.1 -> 1.1.1.96, all of which are
-    dated before 1.2, and then it has 1.1.1.97 -> 1.1.1.100 dated
-    after 1.2.  In this case, we should record 1.1.1.96 as the last
-    vendor revision to have been the head of the default branch.
-
-    If any non-trunk default branch revisions are found:
-
-    - Set their ntdbr members to True.
-
-    - Connect the last one with revision 1.2.
-
-    - Remove revision 1.1 if it is not needed.
-
-    """
-
-    try:
-      if self.default_branch:
-        vendor_cvs_branch_id = self.sdc.branches_data[self.default_branch].id
-        vendor_lod_items = self._cvs_file_items.get_lod_items(
-            self._cvs_file_items[vendor_cvs_branch_id]
-            )
-        if not self._cvs_file_items.process_live_ntdb(vendor_lod_items):
-          return
-      elif self._file_imported:
-        vendor_branch_data = self.sdc.branches_data.get('1.1.1')
-        if vendor_branch_data is None:
-          return
-        else:
-          vendor_lod_items = self._cvs_file_items.get_lod_items(
-              self._cvs_file_items[vendor_branch_data.id]
-              )
-          if not self._cvs_file_items.process_historical_ntdb(
-                vendor_lod_items
-                ):
-            return
-      else:
-        return
-    except VendorBranchError, e:
-      self.collect_data.record_fatal_error(str(e))
-      return
-
-    if self._file_imported:
-      self._cvs_file_items.imported_remove_1_1(vendor_lod_items)
-
-    if Log().is_on(Log.DEBUG):
-      self._cvs_file_items.check_link_consistency()
-
   def get_cvs_file_items(self):
     """Finish up and return a CVSFileItems instance for this file.
 
-    This method must only be called once."""
+    Also fix up any non-trunk default branch revisions (if present) by
+    setting their default_branch_revision members to True and
+    connecting the last one with revision 1.2.
 
-    self._process_ntdbrs()
+    This method must only be called once.
+
+    """
+
+    cvs_items = []
+    cvs_items.extend(self._get_cvs_revisions())
+    cvs_items.extend(self._get_cvs_branches())
+    cvs_items.extend(self._get_cvs_tags())
+    cvs_file_items = CVSFileItems(self.cvs_file, self.pdc.trunk, cvs_items)
+
+    if Log().is_on(Log.DEBUG):
+      cvs_file_items.check_symbol_parent_lods()
+
+    ntdbr_ids = list(self._get_ntdbr_ids())
 
     # Break a circular reference loop, allowing the memory for self
     # and sdc to be freed.
     del self.sdc
 
-    return self._cvs_file_items
+    if ntdbr_ids:
+      rev_1_2 = self._get_rev_1_2()
+      if rev_1_2 is not None:
+        rev_1_2_id = rev_1_2.cvs_rev_id
+      else:
+        rev_1_2_id = None
+      cvs_file_items.adjust_ntdbrs(self._file_imported, ntdbr_ids, rev_1_2_id)
+
+      if Log().is_on(Log.DEBUG):
+        cvs_file_items.check_symbol_parent_lods()
+
+    return cvs_file_items
 
 
 class _ProjectDataCollector:
@@ -859,14 +882,9 @@ class _ProjectDataCollector:
     self.found_rcs_file = False
     self.num_files = 0
 
-    Ctx()._projects[project.id] = project
-
     # The Trunk LineOfDevelopment object for this project.
     self.trunk = Trunk(
-        self.collect_data.symbol_key_generator.gen_id(), self.project
-        )
-    self.project.trunk_id = self.trunk.id
-
+        self.collect_data.symbol_key_generator.gen_id(), self.project)
     # This causes a record for self.trunk to spring into existence:
     self.collect_data.symbol_stats[self.trunk]
 
@@ -876,13 +894,7 @@ class _ProjectDataCollector:
     # and a tag in another.
     self.symbols = {}
 
-    root_cvs_directory = CVSDirectory(
-        self.collect_data.file_key_generator.gen_id(), self.project, None, ''
-        )
-
-    self.project.root_cvs_directory_id = root_cvs_directory.id
-
-    self._visit_non_attic_directory(root_cvs_directory)
+    self._visit_non_attic_directory(self.project.project_cvs_repos_path)
 
     if not self.found_rcs_file:
       self.collect_data.record_fatal_error(
@@ -943,79 +955,11 @@ class _ProjectDataCollector:
     self.collect_data.add_cvs_file_items(cvs_file_items)
     self.collect_data.symbol_stats.register(cvs_file_items)
 
-  def _get_cvs_file(
-        self, parent_directory, basename, file_in_attic, leave_in_attic=False
-        ):
-    """Return a CVSFile describing the file with name BASENAME.
-
-    PARENT_DIRECTORY is the CVSDirectory instance describing the
-    directory that physically holds this file in the filesystem.
-    BASENAME must be the base name of a *,v file within
-    PARENT_DIRECTORY.
-
-    FILE_IN_ATTIC is a boolean telling whether the specified file is
-    in an Attic subdirectory.  If FILE_IN_ATTIC is True, then:
-
-    - If LEAVE_IN_ATTIC is True, then leave the 'Attic' component in
-      the filename.
-
-    - Otherwise, raise FileInAndOutOfAtticException if a file with the
-      same filename appears outside of Attic.
-
-    The CVSFile is assigned a new unique id.  All of the CVSFile
-    information is filled in except mode (which can only be determined
-    by parsing the file).
-
-    Raise FatalError if the resulting filename would not be legal in
-    SVN."""
-
-    filename = os.path.join(parent_directory.filename, basename)
-    verify_svn_filename_legal(filename, basename[:-2])
-
-    if file_in_attic and not leave_in_attic:
-      in_attic = True
-      logical_parent_directory = parent_directory.parent_directory
-
-      # If this file also exists outside of the attic, it's a fatal
-      # error:
-      non_attic_filename = os.path.join(
-          logical_parent_directory.filename, basename,
-          )
-      if os.path.exists(non_attic_filename):
-        raise FileInAndOutOfAtticException(non_attic_filename, filename)
-    else:
-      in_attic = False
-      logical_parent_directory = parent_directory
-
-    file_stat = os.stat(filename)
-
-    # The size of the file in bytes:
-    file_size = file_stat[stat.ST_SIZE]
-
-    # Whether or not the executable bit is set:
-    file_executable = bool(file_stat[0] & stat.S_IXUSR)
-
-    # mode is not known, so we temporarily set it to None.
-    return CVSFile(
-        self.collect_data.file_key_generator.gen_id(),
-        self.project, logical_parent_directory, basename[:-2], in_attic,
-        file_executable, file_size, None
-        )
-
-  def _get_attic_file(self, parent_directory, basename):
-    """Return a CVSFile object for the Attic file at BASENAME.
-
-    PARENT_DIRECTORY is the CVSDirectory that physically contains the
-    file on the filesystem (i.e., the Attic directory).  It is not
-    necessarily the parent_directory of the CVSFile that will be
-    returned.
-
-    Return (CVSFile, retained_in_attic), where RETAINED_IN_ATTIC is a
-    boolean that is True iff CVSFile will remain in the Attic
-    directory."""
+  def _get_attic_file(self, pathname):
+    """Return a CVSFile object for the Attic file at PATHNAME."""
 
     try:
-      return (self._get_cvs_file(parent_directory, basename, True), False)
+      return self.project.get_cvs_file(pathname)
     except FileInAndOutOfAtticException, e:
       if Ctx().retain_conflicting_attic_files:
         Log().warn(
@@ -1028,52 +972,30 @@ class _ProjectDataCollector:
 
       # Either way, return a CVSFile object so that the rest of the
       # file processing can proceed:
-      return (
-          self._get_cvs_file(
-              parent_directory, basename, True, leave_in_attic=True
-              ),
-          True,
-          )
+      return self.project.get_cvs_file(pathname, leave_in_attic=True)
 
-  def _visit_attic_directory(self, cvs_directory):
-    """Visit the Attic directory CVS_DIRECTORY."""
-
+  def _visit_attic_directory(self, dirname):
     # Maps { fname[:-2] : pathname }:
     rcsfiles = {}
 
-    retained_attic_file = False
-
-    for fname in os.listdir(cvs_directory.filename):
-      pathname = os.path.join(cvs_directory.filename, fname)
+    for fname in os.listdir(dirname):
+      pathname = os.path.join(dirname, fname)
       if os.path.isdir(pathname):
         Log().warn("Directory %s found within Attic; ignoring" % (pathname,))
       elif fname.endswith(',v'):
         self.found_rcs_file = True
         rcsfiles[fname[:-2]] = pathname
-        (cvs_file, retained_in_attic) = self._get_attic_file(
-            cvs_directory, fname
-            )
-        retained_attic_file |= retained_in_attic
-        self._process_file(cvs_file)
-
-    if retained_attic_file:
-      # If any files were retained in the Attic directory, then write
-      # the Attic directory to CVSFileDatabase:
-      self.collect_data.add_cvs_directory(cvs_directory)
+        self._process_file(self._get_attic_file(pathname))
 
     return rcsfiles
 
-  def _get_non_attic_file(self, parent_directory, basename):
-    """Return a CVSFile object for the non-Attic file at BASENAME."""
+  def _get_non_attic_file(self, pathname):
+    """Return a CVSFile object for the non-Attic file at PATHNAME."""
 
-    return self._get_cvs_file(parent_directory, basename, False)
+    return self.project.get_cvs_file(pathname)
 
-  def _visit_non_attic_directory(self, cvs_directory):
-    """Visit the non-Attic directory CVS_DIRECTORY."""
-
-    self.collect_data.add_cvs_directory(cvs_directory)
-
-    files = os.listdir(cvs_directory.filename)
+  def _visit_non_attic_directory(self, dirname):
+    files = os.listdir(dirname)
 
     # Map { fname[:-2] : pathname }:
     rcsfiles = {}
@@ -1083,7 +1005,7 @@ class _ProjectDataCollector:
     dirs = []
 
     for fname in files[:]:
-      pathname = os.path.join(cvs_directory.filename, fname)
+      pathname = os.path.join(dirname, fname)
       if os.path.isdir(pathname):
         if fname == 'Attic':
           attic_dir = fname
@@ -1092,18 +1014,14 @@ class _ProjectDataCollector:
       elif fname.endswith(',v'):
         self.found_rcs_file = True
         rcsfiles[fname[:-2]] = pathname
-        self._process_file(self._get_non_attic_file(cvs_directory, fname))
+        self._process_file(self._get_non_attic_file(pathname))
       else:
         # Silently ignore other files:
         pass
 
     if attic_dir is not None:
-      attic_directory = CVSDirectory(
-          self.collect_data.file_key_generator.gen_id(),
-          self.project, cvs_directory, 'Attic',
-          )
-
-      attic_rcsfiles = self._visit_attic_directory(attic_directory)
+      pathname = os.path.join(dirname, attic_dir)
+      attic_rcsfiles = self._visit_attic_directory(pathname)
       alldirs = dirs + [attic_dir]
     else:
       alldirs = dirs
@@ -1114,7 +1032,7 @@ class _ProjectDataCollector:
     # in attic).  (We recurse into the subdirectories nevertheless, to
     # try to detect more problems.)
     for fname in alldirs:
-      pathname = os.path.join(cvs_directory.filename, fname)
+      pathname = os.path.join(dirname, fname)
       for rcsfile_list in [rcsfiles, attic_rcsfiles]:
         if fname in rcsfile_list:
           self.collect_data.record_fatal_error(
@@ -1128,18 +1046,13 @@ class _ProjectDataCollector:
 
     # Now recurse into the other subdirectories:
     for fname in dirs:
-      dirname = os.path.join(cvs_directory.filename, fname)
+      pathname = os.path.join(dirname, fname)
 
       # Verify that the directory name does not contain any illegal
       # characters:
-      verify_svn_filename_legal(dirname, fname)
+      self.project.verify_filename_legal(pathname, fname)
 
-      sub_directory = CVSDirectory(
-          self.collect_data.file_key_generator.gen_id(),
-          self.project, cvs_directory, fname,
-          )
-
-      self._visit_non_attic_directory(sub_directory)
+      self._visit_non_attic_directory(pathname)
 
 
 class CollectData:
@@ -1160,14 +1073,10 @@ class CollectData:
     self.symbol_stats = SymbolStatisticsCollector()
     self.stats_keeper = stats_keeper
 
-    # Key generator for CVSFiles:
-    self.file_key_generator = KeyGenerator()
+    # Key generator to generate unique keys for each CVSRevision object:
+    self.key_generator = KeyGenerator()
 
-    # Key generator for CVSItems:
-    self.item_key_generator = KeyGenerator()
-
-    # Key generator for Symbols:
-    self.symbol_key_generator = KeyGenerator()
+    self.symbol_key_generator = KeyGenerator(1)
 
     self.revision_recorder.start()
 
@@ -1179,18 +1088,13 @@ class CollectData:
     output again in a summary at the end of CollectRevsPass."""
 
     err = '%s: %s' % (error_prefix, err,)
-    Log().error(err + '\n')
+    sys.stderr.write(err + '\n')
     self.fatal_errors.append(err)
 
   def process_project(self, project):
     pdc = _ProjectDataCollector(self, project)
     self.num_files += pdc.num_files
     Log().verbose('Processed', self.num_files, 'files')
-
-  def add_cvs_directory(self, cvs_directory):
-    """Record CVS_DIRECTORY."""
-
-    Ctx()._cvs_file_db.log_file(cvs_directory)
 
   def add_cvs_file_items(self, cvs_file_items):
     """Record the information from CVS_FILE_ITEMS.
@@ -1200,16 +1104,8 @@ class CollectData:
 
     Ctx()._cvs_file_db.log_file(cvs_file_items.cvs_file)
     self._cvs_item_store.add(cvs_file_items)
-
-    self.stats_keeper.record_cvs_file(cvs_file_items.cvs_file)
     for cvs_item in cvs_file_items.values():
       self.stats_keeper.record_cvs_item(cvs_item)
-
-  def _set_cvs_path_ordinals(self):
-    cvs_files = list(Ctx()._cvs_file_db.itervalues())
-    cvs_files.sort(CVSPath.slow_compare)
-    for i in range(len(cvs_files)):
-      cvs_files[i].ordinal = i
 
   def close(self):
     """Close the data structures associated with this instance.
@@ -1225,7 +1121,6 @@ class CollectData:
     self.metadata_db = None
     self._cvs_item_store.close()
     self._cvs_item_store = None
-    self._set_cvs_path_ordinals()
     self.revision_recorder = None
     retval = self.fatal_errors
     self.fatal_errors = None

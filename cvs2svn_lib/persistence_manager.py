@@ -17,6 +17,8 @@
 """This module contains class PersistenceManager."""
 
 
+import bisect
+
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib import config
 from cvs2svn_lib.common import DB_OPEN_NEW
@@ -32,8 +34,7 @@ from cvs2svn_lib.database import IndexedDatabase
 from cvs2svn_lib.svn_commit import SVNRevisionCommit
 from cvs2svn_lib.svn_commit import SVNInitialProjectCommit
 from cvs2svn_lib.svn_commit import SVNPrimaryCommit
-from cvs2svn_lib.svn_commit import SVNBranchCommit
-from cvs2svn_lib.svn_commit import SVNTagCommit
+from cvs2svn_lib.svn_commit import SVNSymbolCommit
 from cvs2svn_lib.svn_commit import SVNPostCommit
 
 
@@ -56,13 +57,8 @@ class PersistenceManager:
     self.mode = mode
     if mode not in (DB_OPEN_NEW, DB_OPEN_READ):
       raise RuntimeError, "Invalid 'mode' argument to PersistenceManager"
-    primer = (
-        SVNInitialProjectCommit,
-        SVNPrimaryCommit,
-        SVNPostCommit,
-        SVNBranchCommit,
-        SVNTagCommit,
-        )
+    primer = (SVNInitialProjectCommit, SVNPrimaryCommit, SVNSymbolCommit,
+              SVNPostCommit,)
     serializer = PrimedPickleSerializer(primer)
     self.svn_commit_db = IndexedDatabase(
         artifact_manager.get_temp_file(config.SVN_COMMITS_INDEX_TABLE),

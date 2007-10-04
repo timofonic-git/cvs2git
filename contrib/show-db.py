@@ -111,7 +111,7 @@ def show_filtered_cvs_item_store():
 
 
 class ProjectList:
-  """A mock project-list that can be assigned to Ctx()._projects."""
+  """A mock project-list that can be assigned to Ctx().projects."""
 
   def __init__(self):
     self.projects = {}
@@ -121,8 +121,10 @@ class ProjectList:
 
 
 def prime_ctx():
+  am = artifact_manager
+
   def rf(filename):
-    artifact_manager.register_temp_file(filename, None)
+    am.register_temp_file(filename, None)
 
   from cvs2svn_lib.common import DB_OPEN_READ
   from cvs2svn_lib.symbol_database import SymbolDatabase
@@ -137,15 +139,16 @@ def prime_ctx():
   rf(config.CVS_ITEMS_FILTERED_INDEX_TABLE)
   artifact_manager.pass_started(None)
 
-  Ctx()._projects = ProjectList()
+  Ctx().projects = ProjectList()
   Ctx()._symbol_db = SymbolDatabase()
   Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
   Ctx()._cvs_items_db = OldCVSItemStore(
-      artifact_manager.get_temp_file(config.CVS_ITEMS_STORE)
+      am.get_temp_file(config.CVS_ITEMS_STORE)
       )
   Ctx()._metadata_db = MetadataDatabase(DB_OPEN_READ)
 
 def main():
+  am = artifact_manager
   try:
     opts, args = getopt.getopt(sys.argv[1:], "RNr:mlfcCiIp:")
   except getopt.GetoptError:
@@ -179,11 +182,7 @@ def main():
     elif o == "-m":
       show_str2marshal_db(config.METADATA_DB)
     elif o == "-f":
-      prime_ctx()
-      cvs_files = list(Ctx()._cvs_file_db.itervalues())
-      cvs_files.sort()
-      for cvs_file in cvs_files:
-        print '%6x: %s' % (cvs_file.id, cvs_file,)
+      show_str2pickle_db(config.CVS_FILES_DB)
     elif o == "-c":
       prime_ctx()
       show_str2ppickle_db(

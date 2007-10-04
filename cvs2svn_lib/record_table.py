@@ -130,96 +130,7 @@ class RecordTableAccessError(RuntimeError):
   pass
 
 
-class AbstractRecordTable:
-  def __init__(self, filename, mode, packer):
-    self.filename = filename
-    self.mode = mode
-    self.packer = packer
-
-  def __str__(self):
-    return '%s(%r)' % (self.__class__.__name__, self.filename,)
-
-  def _set_packed_record(self, i, s):
-    """Set the value for index I to the packed value S."""
-
-    raise NotImplementedError()
-
-  def __setitem__(self, i, v):
-    self._set_packed_record(i, self.packer.pack(v))
-
-  def _get_packed_record(self, i):
-    """Return the packed record for index I.
-
-    Raise KeyError if it is not present."""
-
-    raise NotImplementedError()
-
-  def __getitem__(self, i):
-    """Return the item for index I.
-
-    Raise KeyError if that item has never been set (or if it was set
-    to self.packer.empty_value)."""
-
-    s = self._get_packed_record(i)
-
-    if s == self.packer.empty_value:
-      raise KeyError(i)
-
-    return self.packer.unpack(s)
-
-  def get_many(self, indexes, default=None):
-    """Yield (index, item) typles for INDEXES in arbitrary order.
-
-    Yield (index,default) for indices for which not item is defined."""
-
-    indexes = list(indexes)
-    # Sort the indexes to reduce disk seeking:
-    indexes.sort()
-    for i in indexes:
-      yield (i, self.get(i, default))
-
-  def get(self, i, default=None):
-    try:
-      return self[i]
-    except KeyError:
-      return default
-
-  def __delitem__(self, i):
-    """Delete the item for index I.
-
-    Raise KeyError if that item has never been set (or if it was set
-    to self.packer.empty_value)."""
-
-    if self.mode == DB_OPEN_READ:
-      raise RecordTableAccessError()
-
-    # Check that the value was set (otherwise raise KeyError):
-    self[i]
-    self._set_packed_record(i, self.packer.empty_value)
-
-  def iterkeys(self):
-    """Yield the keys in the map in key order."""
-
-    for i in xrange(0, self._limit):
-      try:
-        self[i]
-        yield i
-      except KeyError:
-        pass
-
-  def itervalues(self):
-    """Yield the values in the map in key order.
-
-    Skip over values that haven't been defined."""
-
-    for i in xrange(0, self._limit):
-      try:
-        yield self[i]
-      except KeyError:
-        pass
-
-
-class RecordTable(AbstractRecordTable):
+class RecordTable:
   # The approximate amount of memory that should be used for the cache
   # for each instance of this class:
   CACHE_MEMORY = 4 * 1024 * 1024
@@ -229,7 +140,8 @@ class RecordTable(AbstractRecordTable):
   CACHE_OVERHEAD_PER_ENTRY = 96
 
   def __init__(self, filename, mode, packer, cache_memory=CACHE_MEMORY):
-    AbstractRecordTable.__init__(self, filename, mode, packer)
+    self.filename = filename
+    self.mode = mode
     if self.mode == DB_OPEN_NEW:
       self.f = open(self.filename, 'wb+')
     elif self.mode == DB_OPEN_WRITE:
@@ -238,6 +150,7 @@ class RecordTable(AbstractRecordTable):
       self.f = open(self.filename, 'rb')
     else:
       raise RuntimeError('Invalid mode %r' % self.mode)
+    self.packer = packer
     self.cache_memory = cache_memory
 
     # Number of items that can be stored in the write cache.
@@ -257,6 +170,9 @@ class RecordTable(AbstractRecordTable):
 
     # The index just beyond the last record ever written to disk:
     self._limit_written = self._limit
+
+  def __str__(self):
+    return 'RecordTable(%r)' % (self.filename,)
 
   def flush(self):
     Log().debug('Flushing cache for %s' % (self,))
@@ -290,6 +206,8 @@ class RecordTable(AbstractRecordTable):
     self._cache.clear()
 
   def _set_packed_record(self, i, s):
+    """Set the value for index I to the packed value S."""
+
     if self.mode == DB_OPEN_READ:
       raise RecordTableAccessError()
     if i < 0:
@@ -299,9 +217,17 @@ class RecordTable(AbstractRecordTable):
       self.flush()
     self._limit = max(self._limit, i + 1)
 
-  def _get_packed_record(self, i):
+  def __setitem__(self, i, v):
+    self._set_packed_record(i, self.packer.pack(v))
+
+  def __getitem__(self, i):
+    """Return the item for index I.
+
+    Raise KeyError if that item has never been set (or if it was set
+    to self.packer.empty_value)."""
+
     try:
-      return self._cache[i][1]
+      s = self._cache[i][1]
     except KeyError:
       if not 0 <= i < self._limit_written:
         raise KeyError(i)
@@ -311,7 +237,59 @@ class RecordTable(AbstractRecordTable):
       if len(self._cache) >= self._max_memory_cache:
         self.flush()
 
-      return s
+    if s == self.packer.empty_value:
+      raise KeyError(i)
+
+    return self.packer.unpack(s)
+
+  def get_many(self, indexes):
+    """Generate the items for the specified INDEXES in arbitrary order."""
+
+    indexes = list(indexes)
+    # Sort the indexes to reduce disk seeking:
+    indexes.sort()
+    for i in indexes:
+      yield self[i]
+
+  def get(self, i, default=None):
+    try:
+      return self[i]
+    except KeyError:
+      return default
+
+  def __delitem__(self, i):
+    """Delete the item for index I.
+
+    Raise KeyError if that item has never been set (or if it was set
+    to self.packer.empty_value)."""
+
+    if self.mode == DB_OPEN_READ:
+      raise RecordTableAccessError()
+
+    # Check that the value was set (otherwise raise KeyError):
+    self[i]
+    self._set_packed_record(i, self.packer.empty_value)
+
+  def iterkeys(self):
+    """Return the keys in the map in key order."""
+
+    for i in xrange(0, self._limit):
+      try:
+        self[i]
+        yield i
+      except KeyError:
+        pass
+
+  def itervalues(self):
+    """Yield the values in the map in key order.
+
+    Skip over values that haven't been defined."""
+
+    for i in xrange(0, self._limit):
+      try:
+        yield self[i]
+      except KeyError:
+        pass
 
   def close(self):
     self.flush()
@@ -320,11 +298,13 @@ class RecordTable(AbstractRecordTable):
     self.f = None
 
 
-class MmapRecordTable(AbstractRecordTable):
+class MmapRecordTable:
   GROWTH_INCREMENT = 65536
 
   def __init__(self, filename, mode, packer):
-    AbstractRecordTable.__init__(self, filename, mode, packer)
+    self.filename = filename
+    self.mode = mode
+    self.packer = packer
     if self.mode == DB_OPEN_NEW:
       self.python_file = open(self.filename, 'wb+')
       self.python_file.write('\0' * self.GROWTH_INCREMENT)
@@ -360,10 +340,15 @@ class MmapRecordTable(AbstractRecordTable):
     else:
       raise RuntimeError('Invalid mode %r' % self.mode)
 
+  def __str__(self):
+    return 'MmapRecordTable(%r)' % (self.filename,)
+
   def flush(self):
     self.f.flush()
 
   def _set_packed_record(self, i, s):
+    """Set the value for index I to the packed value S."""
+
     if self.mode == DB_OPEN_READ:
       raise RecordTableAccessError()
     if i < 0:
@@ -389,11 +374,64 @@ class MmapRecordTable(AbstractRecordTable):
       self.f.seek(i * self.packer.record_len)
       self.f.write(s)
 
-  def _get_packed_record(self, i):
+  def __setitem__(self, i, v):
+    self._set_packed_record(i, self.packer.pack(v))
+
+  def __getitem__(self, i):
+    """Return the item for index I.
+
+    Raise KeyError if that item has never been set (or if it was set
+    to self.packer.empty_value)."""
+
     if not 0 <= i < self._limit:
       raise KeyError(i)
     self.f.seek(i * self.packer.record_len)
-    return self.f.read(self.packer.record_len)
+    s = self.f.read(self.packer.record_len)
+
+    if s == self.packer.empty_value:
+      raise KeyError(i)
+
+    return self.packer.unpack(s)
+
+  def get(self, i, default=None):
+    try:
+      return self[i]
+    except KeyError:
+      return default
+
+  def __delitem__(self, i):
+    """Delete the item for index I.
+
+    Raise KeyError if that item has never been set (or if it was set
+    to self.packer.empty_value)."""
+
+    if self.mode == DB_OPEN_READ:
+      raise RecordTableAccessError()
+
+    # Check that the value was set (otherwise raise KeyError):
+    self[i]
+    self._set_packed_record(i, self.packer.empty_value)
+
+  def iterkeys(self):
+    """Yield the keys in the map in order."""
+
+    for i in xrange(0, self._limit):
+      try:
+        self[i]
+        yield i
+      except KeyError:
+        pass
+
+  def itervalues(self):
+    """Yield the values in the map in key order.
+
+    Skip over values that haven't been defined."""
+
+    for i in xrange(0, self._limit):
+      try:
+        yield self[i]
+      except KeyError:
+        pass
 
   def close(self):
     self.flush()

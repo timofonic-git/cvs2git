@@ -77,11 +77,9 @@ class Pass(object):
 
     artifact_manager.register_temp_file_needed(basename, self)
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     """Carry out this step of the conversion.
-
-    RUN_OPTIONS is an instance of RunOptions.  STATS_KEEPER is an
-    instance of StatsKeeper."""
+    STATS_KEEPER is a StatsKeeper instance."""
 
     raise NotImplementedError
 
@@ -130,7 +128,7 @@ class PassManager:
           return i + 1
       raise InvalidPassError('Unknown pass name (%r).' % (pass_name,))
 
-  def run(self, run_options):
+  def run(self, start_pass, end_pass):
     """Run the specified passes, one after another.
 
     START_PASS is the number of the first pass that should be run.
@@ -141,8 +139,8 @@ class PassManager:
     # to execute, using the Python index range convention (i.e., first
     # pass executed and first pass *after* the ones that should be
     # executed).
-    index_start = run_options.start_pass - 1
-    index_end = run_options.end_pass
+    index_start = start_pass - 1
+    index_end = end_pass
 
     artifact_manager.register_temp_file(config.STATISTICS_FILE, self)
 
@@ -165,22 +163,15 @@ class PassManager:
     for the_pass in self.passes[0:index_start]:
       artifact_manager.pass_skipped(the_pass)
 
-    # Clear the pass timings for passes that will have to be redone:
-    for i in range(index_end, len(self.passes)):
-      stats_keeper.clear_duration_for_pass(i)
-
     start_time = time.time()
     for i in range(index_start, index_end):
       the_pass = self.passes[i]
       Log().quiet('----- pass %d (%s) -----' % (i + 1, the_pass.name,))
       artifact_manager.pass_started(the_pass)
-      the_pass.run(run_options, stats_keeper)
+      the_pass.run(stats_keeper)
       end_time = time.time()
       stats_keeper.log_duration_for_pass(
-          end_time - start_time, i + 1, the_pass.name
-          )
-      stats_keeper.archive()
-      Log().normal(stats_keeper.single_pass_timing(i + 1))
+          end_time - start_time, i + 1, the_pass.name)
       start_time = end_time
       Ctx().clean()
       # Allow the artifact manager to clean up artifacts that are no

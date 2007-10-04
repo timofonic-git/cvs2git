@@ -98,17 +98,17 @@ class MimeMapper(SVNPropertySetter):
       type = extensions.pop(0)
       for ext in extensions:
         if ext in self.mappings and self.mappings[ext] != type:
-          Log().error(
-              "%s: ambiguous MIME mapping for *.%s (%s or %s)\n"
-              % (warning_prefix, ext, self.mappings[ext], type)
-              )
+          sys.stderr.write("%s: ambiguous MIME mapping for *.%s (%s or %s)\n"
+                           % (warning_prefix, ext, self.mappings[ext], type))
         self.mappings[ext] = type
 
   def set_properties(self, s_item):
     if self.propname in s_item.svn_props:
       return
 
-    basename, extension = os.path.splitext(s_item.cvs_rev.cvs_file.basename)
+    basename, extension = os.path.splitext(
+        os.path.basename(s_item.cvs_rev.cvs_path)
+        )
 
     # Extension includes the dot, so strip it (will leave extension
     # empty if filename ends with a dot, which is ok):
@@ -187,8 +187,8 @@ class AutoPropsPropertySetter(SVNPropertySetter):
     self.patterns.append(
         self.Pattern(self.transform_case(pattern), propdict))
 
-  def get_propdict(self, cvs_file):
-    basename = self.transform_case(cvs_file.basename)
+  def get_propdict(self, path):
+    basename = self.transform_case(os.path.basename(path))
     propdict = {}
     for pattern in self.patterns:
       if pattern.match(basename):
@@ -197,14 +197,14 @@ class AutoPropsPropertySetter(SVNPropertySetter):
             if propdict[key] != value:
               Log().warn(
                   "Contradictory values set for property '%s' for file %s."
-                  % (key, cvs_file,))
+                  % (key, path,))
           else:
             propdict[key] = value
 
     return propdict
 
   def set_properties(self, s_item):
-    propdict = self.get_propdict(s_item.cvs_rev.cvs_file)
+    propdict = self.get_propdict(s_item.cvs_rev.cvs_path)
     for (k,v) in propdict.items():
       if k in s_item.svn_props:
         if s_item.svn_props[k] != v:

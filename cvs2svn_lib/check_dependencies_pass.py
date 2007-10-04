@@ -41,7 +41,6 @@ class CheckDependenciesPass(Pass):
     Pass.__init__(self)
 
   def register_artifacts(self):
-    self._register_temp_file_needed(config.PROJECTS)
     self._register_temp_file_needed(config.SYMBOL_DB)
     self._register_temp_file_needed(config.CVS_FILES_DB)
 
@@ -51,10 +50,7 @@ class CheckDependenciesPass(Pass):
   def get_cvs_item(self, item_id):
     raise NotImplementedError()
 
-  def run(self, run_options, stats_keeper):
-    Ctx()._projects = read_projects(
-        artifact_manager.get_temp_file(config.PROJECTS)
-        )
+  def run(self, stats_keeper):
     Ctx()._cvs_file_db = CVSFileDatabase(DB_OPEN_READ)
     self.symbol_db = SymbolDatabase()
     Ctx()._symbol_db = self.symbol_db
@@ -77,12 +73,9 @@ class CheckDependenciesPass(Pass):
               '%s lists succ=%s, but not vice versa.' % (cvs_item, succ,))
 
     if fatal_errors:
-      raise FatalException(
-          'Dependencies inconsistent:\n'
-          '%s\n'
-          'Exited due to fatal error(s).'
-          % ('\n'.join(fatal_errors),)
-          )
+      raise FatalException("Dependencies inconsistent:\n"
+                           + "\n".join(fatal_errors) + "\n"
+                           + "Exited due to fatal error(s).\n")
 
     self.symbol_db.close()
     self.symbol_db = None
@@ -133,13 +126,13 @@ class CheckIndexedItemStoreDependenciesPass(CheckDependenciesPass):
   def get_cvs_item(self, item_id):
     return self.cvs_item_store[item_id]
 
-  def run(self, run_options, stats_keeper):
+  def run(self, stats_keeper):
     self.cvs_item_store = IndexedCVSItemStore(
         artifact_manager.get_temp_file(self.cvs_items_store_file),
         artifact_manager.get_temp_file(self.cvs_items_store_index_file),
         DB_OPEN_READ)
 
-    CheckDependenciesPass.run(self, run_options, stats_keeper)
+    CheckDependenciesPass.run(self, stats_keeper)
 
     self.cvs_item_store.close()
     self.cvs_item_store = None

@@ -42,7 +42,6 @@ class Log:
   # These constants represent the log levels that this class supports.
   # The increase_verbosity() and decrease_verbosity() methods rely on
   # these constants being consecutive integers:
-  ERROR = -2
   WARN = -1
   QUIET = 0
   NORMAL = 1
@@ -57,18 +56,10 @@ class Log:
     self.__dict__ = self.__shared_state
     if self.__dict__:
       return
-
     self.log_level = Log.NORMAL
-
     # Set this to True if you want to see timestamps on each line output.
     self.use_timestamps = False
-
-    # The output file to use for errors:
-    self._err = sys.stderr
-
-    # The output file to use for lower-priority messages:
-    self._out = sys.stdout
-
+    self.logger = sys.stdout
     # Lock to serialize writes to the log:
     self.lock = threading.Lock()
 
@@ -82,7 +73,7 @@ class Log:
   def decrease_verbosity(self):
     self.lock.acquire()
     try:
-      self.log_level = max(self.log_level - 1, Log.ERROR)
+      self.log_level = max(self.log_level - 1, Log.WARN)
     finally:
       self.lock.release()
 
@@ -94,83 +85,61 @@ class Log:
     return self.log_level >= level
 
   def _timestamp(self):
-    """Return a timestamp if needed, as a string with a trailing space."""
+    """Return a timestamp if needed."""
 
     retval = []
 
     if self.log_level >= Log.DEBUG:
-      retval.append('%f: ' % (time.time() - self.start_time,))
+      retval.append('%f:' % (time.time() - self.start_time,))
 
     if self.use_timestamps:
-      retval.append(time.strftime('[%Y-%m-%d %I:%M:%S %Z] - '))
+      retval.append(time.strftime('[%Y-%m-%d %I:%M:%S %Z] -'))
 
-    return ''.join(retval)
+    return retval
 
-  def _write(self, out, *args):
-    """Write a message to OUT.
+  def write(self, *args):
+    """Write a message to the log.
 
-    If there are multiple ARGS, they will be separated by spaces.  If
-    there are multiple lines, they will be output one by one with the
-    same timestamp prefix."""
-
-    timestamp = self._timestamp()
-    s = ' '.join(map(str, args))
-    lines = s.split('\n')
-    if lines and not lines[-1]:
-      del lines[-1]
+    This is the public method to use for writing to a file.  If there
+    are multiple ARGS, they will be separated by spaces."""
 
     self.lock.acquire()
     try:
-      for s in lines:
-        out.write('%s%s\n' % (timestamp, s,))
+      self.logger.write(' '.join(self._timestamp() + map(str, args)) + "\n")
       # Ensure that log output doesn't get out-of-order with respect to
       # stderr output.
-      out.flush()
+      self.logger.flush()
     finally:
       self.lock.release()
-
-  def write(self, *args):
-    """Write a message to SELF._out.
-
-    This is a public method to use for writing to the output log
-    unconditionally."""
-
-    self._write(self._out, *args)
-
-  def error(self, *args):
-    """Log a message at the ERROR level."""
-
-    if self.is_on(Log.ERROR):
-      self._write(self._err, *args)
 
   def warn(self, *args):
     """Log a message at the WARN level."""
 
     if self.is_on(Log.WARN):
-      self._write(self._out, *args)
+      self.write(*args)
 
   def quiet(self, *args):
     """Log a message at the QUIET level."""
 
     if self.is_on(Log.QUIET):
-      self._write(self._out, *args)
+      self.write(*args)
 
   def normal(self, *args):
     """Log a message at the NORMAL level."""
 
     if self.is_on(Log.NORMAL):
-      self._write(self._out, *args)
+      self.write(*args)
 
   def verbose(self, *args):
     """Log a message at the VERBOSE level."""
 
     if self.is_on(Log.VERBOSE):
-      self._write(self._out, *args)
+      self.write(*args)
 
   def debug(self, *args):
     """Log a message at the DEBUG level."""
 
     if self.is_on(Log.DEBUG):
-      self._write(self._out, *args)
+      self.write(*args)
 
 

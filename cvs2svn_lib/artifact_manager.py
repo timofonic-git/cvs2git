@@ -17,11 +17,42 @@
 """This module manages the artifacts produced by conversion passes."""
 
 
+import os
+
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib.set_support import *
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.log import Log
-from cvs2svn_lib.artifact import TempFile
+
+
+class Artifact:
+  """An artifact that can be created, used across cvs2svn passes, then
+  cleaned up."""
+
+  def __init__(self):
+    # A set of passes that need this artifact.  This field is
+    # maintained by ArtifactManager.
+    self._passes_needed = set()
+
+  def cleanup(self):
+    """This artifact is no longer needed; clean it up."""
+
+    pass
+
+
+class TempFileArtifact(Artifact):
+  """A temporary file that can be used across cvs2svn passes."""
+
+  def __init__(self, basename):
+    Artifact.__init__(self)
+    self.filename = Ctx().get_temp_filename(basename)
+
+  def cleanup(self):
+    Log().verbose("Deleting", self.filename)
+    os.unlink(self.filename)
+
+  def __str__(self):
+    return 'Temporary file %r' % self.filename
 
 
 class ArtifactNotActiveError(Exception):
@@ -42,14 +73,14 @@ class ArtifactManager:
 
   To use this class:
 
-  - Call artifact_manager.set_artifact(name, artifact) once for each
-    known artifact.
+  - Call artifact_manager[name] = artifact once for each known
+    artifact.
 
-  - Call artifact_manager.creates(which_pass, artifact) to indicate
-    that WHICH_PASS is the pass that creates ARTIFACT.
+  - Call artifact_manager.creates(which_pass, name) to indicate that
+    WHICH_PASS is the pass that creates the artifact named NAME.
 
-  - Call artifact_manager.uses(which_pass, artifact) to indicate that
-    WHICH_PASS needs to use ARTIFACT.
+  - Call artifact_manager.uses(which_pass, name) to indicate that
+    WHICH_PASS needs to use the artifact named NAME.
 
   There are also helper methods register_temp_file(),
   register_artifact_needed(), and register_temp_file_needed() which
@@ -88,7 +119,7 @@ class ArtifactManager:
     # A set of passes that are currently being executed.
     self._active_passes = set()
 
-  def set_artifact(self, name, artifact):
+  def __setitem__(self, name, artifact):
     """Add ARTIFACT to the list of artifacts that we manage.
 
     Store it under NAME."""
@@ -96,7 +127,7 @@ class ArtifactManager:
     assert name not in self._artifacts
     self._artifacts[name] = artifact
 
-  def get_artifact(self, name):
+  def __getitem__(self, name):
     """Return the artifact with the specified name.
 
     If the artifact does not currently exist, raise a KeyError.  If it
@@ -111,20 +142,23 @@ class ArtifactManager:
     else:
       raise ArtifactNotActiveError(name)
 
-  def creates(self, which_pass, artifact):
-    """Register that WHICH_PASS creates ARTIFACT.
+  def creates(self, which_pass, name):
+    """Register that WHICH_PASS creates the artifact named NAME.
 
-    ARTIFACT must already have been registered."""
+    An artifact with this name must already have been registered."""
+
+    artifact = self._artifacts[name]
 
     # An artifact is automatically "needed" in the pass in which it is
     # created:
-    self.uses(which_pass, artifact)
+    self.uses(which_pass, name)
 
-  def uses(self, which_pass, artifact):
-    """Register that WHICH_PASS uses ARTIFACT.
+  def uses(self, which_pass, name):
+    """Register that WHICH_PASS uses the artifact named NAME.
 
-    ARTIFACT must already have been registered."""
+    An artifact with this name must already have been registered."""
 
+    artifact = self._artifacts[name]
     artifact._passes_needed.add(which_pass)
     if which_pass in self._pass_needs:
       self._pass_needs[which_pass].add(artifact)
@@ -136,15 +170,19 @@ class ArtifactManager:
 
     Return the filename of the temporary file."""
 
-    artifact = TempFile(basename)
-    self.set_artifact(basename, artifact)
-    self.creates(which_pass, artifact)
+    artifact = TempFileArtifact(basename)
+    self[basename] = artifact
+    self.creates(which_pass, basename)
+    return artifact.filename
+
+  def get_artifact(self, artifact_name):
+    return self[artifact_name]
 
   def get_temp_file(self, basename):
     """Return the filename of the temporary file with the specified BASENAME.
 
-    If the temporary file is not an existing, registered TempFile,
-    raise a KeyError."""
+    If the temporary file is not an existing, registered
+    TempFileArtifact, raise a KeyError."""
 
     return self.get_artifact(basename).filename
 

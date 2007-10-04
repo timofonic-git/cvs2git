@@ -17,8 +17,6 @@
 """This module contains database facilities used by cvs2svn."""
 
 
-from __future__ import generators
-
 import cPickle
 
 from cvs2svn_lib.boolean import *
@@ -28,7 +26,6 @@ from cvs2svn_lib.common import DB_OPEN_WRITE
 from cvs2svn_lib.common import DB_OPEN_NEW
 from cvs2svn_lib.log import Log
 from cvs2svn_lib.artifact_manager import artifact_manager
-from cvs2svn_lib.cvs_file import CVSPath
 
 
 class CVSFileDatabase:
@@ -41,14 +38,11 @@ class CVSFileDatabase:
     self.mode = mode
 
     if self.mode == DB_OPEN_NEW:
-      # A list of CVSFile instances where _cvs_files[cvs_file.id] ==
-      # cvs_file.  If there are any gaps in the numerical sequence,
-      # the corresponding array positions are None.
-      self._cvs_files = []
+      # A map { id : CVSFile }
+      self._cvs_files = {}
     elif self.mode == DB_OPEN_READ:
       f = open(artifact_manager.get_temp_file(config.CVS_FILES_DB), 'rb')
       self._cvs_files = cPickle.load(f)
-      f.close()
     else:
       raise RuntimeError('Invalid mode %r' % self.mode)
 
@@ -58,24 +52,12 @@ class CVSFileDatabase:
     if self.mode == DB_OPEN_READ:
       raise RuntimeError('Cannot write items in mode %r' % self.mode)
 
-    # Extend array if necessary:
-    while cvs_file.id >= len(self._cvs_files):
-      self._cvs_files.append(None)
-
     self._cvs_files[cvs_file.id] = cvs_file
-
-  def itervalues(self):
-    for cvs_file in self._cvs_files:
-      if cvs_file is not None:
-        yield cvs_file
 
   def get_file(self, id):
     """Return the CVSFile with the specified ID."""
 
-    retval = self._cvs_files[id]
-    if retval is None:
-      raise KeyError(id)
-    return retval
+    return self._cvs_files[id]
 
   def close(self):
     if self.mode == DB_OPEN_NEW:

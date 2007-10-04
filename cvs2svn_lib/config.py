@@ -33,9 +33,6 @@ CO_EXECUTABLE = 'co'
 CVS_EXECUTABLE = 'cvs'
 SORT_EXECUTABLE = 'sort'
 
-# A pickled list of the projects defined for this conversion.
-PROJECTS = 'projects.pck'
-
 # The first file contains enough information about each CVSRevision to
 # deduce preliminary Changesets.  The second file is a sorted version
 # of the first.
@@ -115,6 +112,7 @@ SYMBOL_OPENINGS_CLOSINGS_SORTED = 'symbolic-names-s.txt'
 
 # Skeleton version of an svn filesystem.  See class
 # SVNRepositoryMirror for how these work.
+SVN_MIRROR_REVISIONS_TABLE = 'svn-revisions.dat'
 SVN_MIRROR_NODES_INDEX_TABLE = 'svn-nodes-index.dat'
 SVN_MIRROR_NODES_STORE = 'svn-nodes.pck'
 

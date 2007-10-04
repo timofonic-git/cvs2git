@@ -17,8 +17,6 @@
 """Manage change sets."""
 
 
-from __future__ import generators
-
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib.set_support import *
 from cvs2svn_lib.common import InternalError
@@ -35,19 +33,12 @@ class Changeset(object):
 
   def __init__(self, id, cvs_item_ids):
     self.id = id
-    self.cvs_item_ids = list(cvs_item_ids)
+    self.cvs_item_ids = set(cvs_item_ids)
 
   def get_cvs_items(self):
-    """Yield the CVSItems within this Changeset."""
+    """Return the set of CVSItems within this Changeset."""
 
-    for (id, cvs_item) in Ctx()._cvs_items_db.get_many(self.cvs_item_ids):
-      assert cvs_item is not None
-      yield cvs_item
-
-  def get_projects_opened(self):
-    """Return the set of projects that might be opened by this changeset."""
-
-    raise NotImplementedError()
+    return set(Ctx()._cvs_items_db.get_many(self.cvs_item_ids))
 
   def create_graph_node(self, cvs_item_to_changeset_id):
     """Return a ChangesetGraphNode for this Changeset."""
@@ -65,10 +56,11 @@ class Changeset(object):
     raise NotImplementedError()
 
   def __getstate__(self):
-    return (self.id, self.cvs_item_ids,)
+    return (self.id, list(self.cvs_item_ids),)
 
   def __setstate__(self, state):
-    (self.id, self.cvs_item_ids,) = state
+    (self.id, cvs_item_ids,) = state
+    self.cvs_item_ids = set(cvs_item_ids)
 
   def __cmp__(self, other):
     raise NotImplementedError()
@@ -95,14 +87,10 @@ class RevisionChangeset(Changeset):
       time_range.add(cvs_item.timestamp)
 
       for pred_id in cvs_item.get_pred_ids():
-        changeset_id = cvs_item_to_changeset_id.get(pred_id)
-        if changeset_id is not None:
-          pred_ids.add(changeset_id)
+        pred_ids.add(cvs_item_to_changeset_id[pred_id])
 
       for succ_id in cvs_item.get_succ_ids():
-        changeset_id = cvs_item_to_changeset_id.get(succ_id)
-        if changeset_id is not None:
-          succ_ids.add(changeset_id)
+        succ_ids.add(cvs_item_to_changeset_id[succ_id])
 
     return ChangesetGraphNode(self, time_range, pred_ids, succ_ids)
 
@@ -142,12 +130,6 @@ class OrderedChangeset(Changeset):
     # is the last OrderedChangeset:
     self.next_id = next_id
 
-  def get_projects_opened(self):
-    retval = set()
-    for cvs_item in self.get_cvs_items():
-      retval.add(cvs_item.cvs_file.project)
-    return retval
-
   def create_graph_node(self, cvs_item_to_changeset_id):
     time_range = TimeRange()
 
@@ -164,14 +146,10 @@ class OrderedChangeset(Changeset):
       time_range.add(cvs_item.timestamp)
 
       for pred_id in cvs_item.get_symbol_pred_ids():
-        changeset_id = cvs_item_to_changeset_id.get(pred_id)
-        if changeset_id is not None:
-          pred_ids.add(changeset_id)
+        pred_ids.add(cvs_item_to_changeset_id[pred_id])
 
       for succ_id in cvs_item.get_symbol_succ_ids():
-        changeset_id = cvs_item_to_changeset_id.get(succ_id)
-        if changeset_id is not None:
-          succ_ids.add(changeset_id)
+        succ_ids.add(cvs_item_to_changeset_id[succ_id])
 
     return ChangesetGraphNode(self, time_range, pred_ids, succ_ids)
 
@@ -199,24 +177,16 @@ class SymbolChangeset(Changeset):
     Changeset.__init__(self, id, cvs_item_ids)
     self.symbol = symbol
 
-  def get_projects_opened(self):
-    # A SymbolChangeset can never open a project.
-    return set()
-
   def create_graph_node(self, cvs_item_to_changeset_id):
     pred_ids = set()
     succ_ids = set()
 
     for cvs_item in self.get_cvs_items():
       for pred_id in cvs_item.get_pred_ids():
-        changeset_id = cvs_item_to_changeset_id.get(pred_id)
-        if changeset_id is not None:
-          pred_ids.add(changeset_id)
+        pred_ids.add(cvs_item_to_changeset_id[pred_id])
 
       for succ_id in cvs_item.get_succ_ids():
-        changeset_id = cvs_item_to_changeset_id.get(succ_id)
-        if changeset_id is not None:
-          succ_ids.add(changeset_id)
+        succ_ids.add(cvs_item_to_changeset_id[succ_id])
 
     return ChangesetGraphNode(self, TimeRange(), pred_ids, succ_ids)
 

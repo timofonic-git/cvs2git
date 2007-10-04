@@ -23,35 +23,16 @@ from cvs2svn_lib.boolean import *
 from cvs2svn_lib.set_support import *
 from cvs2svn_lib import config
 from cvs2svn_lib.common import error_prefix
-from cvs2svn_lib.common import FatalException
-from cvs2svn_lib.common import PathsNotDisjointException
-from cvs2svn_lib.common import verify_paths_disjoint
+from cvs2svn_lib.common import InternalError
 from cvs2svn_lib.log import Log
 from cvs2svn_lib.artifact_manager import artifact_manager
 from cvs2svn_lib.symbol import Trunk
 from cvs2svn_lib.symbol import Symbol
-from cvs2svn_lib.symbol import IncludedSymbol
-from cvs2svn_lib.symbol import Branch
 from cvs2svn_lib.symbol import Tag
 from cvs2svn_lib.symbol import ExcludedSymbol
+from cvs2svn_lib.symbol import TypedSymbol
 from cvs2svn_lib.cvs_item import CVSBranch
 from cvs2svn_lib.cvs_item import CVSTag
-
-
-class SymbolPlanException(Exception):
-  def __init__(self, stats, symbol, msg):
-    self.stats = stats
-    self.symbol = symbol
-    Exception.__init__(
-        self,
-        'Cannot convert the following symbol to %s: %s\n    %s'
-        % (symbol, msg, self.stats,)
-        )
-
-
-class IndeterminateSymbolException(SymbolPlanException):
-  def __init__(self, stats, symbol):
-    SymbolPlanException.__init__(self, stats, symbol, 'Indeterminate type')
 
 
 class _Stats:
@@ -70,10 +51,6 @@ class _Stats:
     branch_commit_count -- the number of files in which there were
         commits on this lod
 
-    pure_ntdb_count -- the number of files in which this branch was
-        purely a non-trunk default branch (consisting only of
-        non-trunk default branch revisions).
-
     branch_blockers -- a set of Symbol instances for any symbols that
         sprout from a branch with this name.
 
@@ -87,7 +64,6 @@ class _Stats:
     self.branch_create_count = 0
     self.branch_commit_count = 0
     self.branch_blockers = set()
-    self.pure_ntdb_count = 0
     self.possible_parents = { }
 
   def register_tag_creation(self):
@@ -112,11 +88,6 @@ class _Stats:
     symbol."""
 
     self.branch_blockers.add(blocker)
-
-  def register_pure_ntdb(self):
-    """Register that this branch is a pure import branch in one file."""
-
-    self.pure_ntdb_count += 1
 
   def register_possible_parent(self, lod):
     """Register that LOD was a possible parent for SELF.lod in a file."""
@@ -177,50 +148,37 @@ class _Stats:
         and not self.possible_parents
         )
 
-  def _check_preferred_parent_allowed(self, symbol):
-    """Check that the selected preferred parent is a possible parent."""
+  def get_preferred_parents(self):
+    """Return the LinesOfDevelopment preferred as parents for this lod.
 
-    if isinstance(symbol, IncludedSymbol) \
-           and symbol.preferred_parent_id is not None:
-      for pp in self.possible_parents.keys():
-        if pp.id == symbol.preferred_parent_id:
-          return
-      else:
-        raise SymbolPlanException(
-            self, symbol,
-            'The selected parent is not among the symbol\'s '
-            'possible parents.'
-            )
+    Return the tuple (BEST_SYMBOLS, BEST_COUNT), where BEST_SYMBOLS is
+    the set of LinesOfDevelopment that appeared most often as possible
+    parents, and BEST_COUNT is the number of times those symbols
+    appeared.  BEST_SYMBOLS might contain multiple symbols if multiple
+    LinesOfDevelopment have the same count."""
 
-  def check_consistency(self, symbol):
-    """Check whether the symbol described by SELF can be converted as SYMBOL.
+    best_count = -1
+    best_symbols = set()
+    for (symbol, count) in self.possible_parents.items():
+      if count > best_count:
+        best_count = count
+        best_symbols.clear()
+        best_symbols.add(symbol)
+      elif count == best_count:
+        best_symbols.add(symbol)
 
-    It is planned to convert SELF.lod as SYMBOL.  If there are any
-    problems with that plan, raise a SymbolPlanException."""
-
-    if not isinstance(symbol, (Branch, Tag, ExcludedSymbol)):
-      raise IndeterminateSymbolException(self, symbol)
-
-    if symbol.id != self.lod.id:
-      raise SymbolPlanException(self, symbol, 'IDs must match')
-
-    if symbol.project != self.lod.project:
-      raise SymbolPlanException(self, symbol, 'Projects must match')
-
-    if symbol.name != self.lod.name:
-      raise SymbolPlanException(self, symbol, 'Names must match')
-
-    self._check_preferred_parent_allowed(symbol)
+    return (best_symbols, best_count)
 
   def __str__(self):
     return (
-        '\'%s\' is a tag in %d files, a branch in %d files, '
-        'a pure import in %d files, and has commits in %d files'
-        % (self.lod, self.tag_create_count, self.branch_create_count,
-           self.pure_ntdb_count, self.branch_commit_count))
+        '\'%s\' is a tag in %d files, a branch in '
+        '%d files and has commits in %d files'
+        % (self.lod, self.tag_create_count,
+           self.branch_create_count, self.branch_commit_count))
 
   def __repr__(self):
-    retval = ['%s\n  possible parents:\n' % (self,)]
+    retval = ['%s; %d possible parents:\n'
+              % (self, len(self.possible_parents))]
     parent_counts = self.possible_parents.items()
     parent_counts.sort(lambda a,b: - cmp(a[1], b[1]))
     for (symbol, count) in parent_counts:
@@ -228,12 +186,6 @@ class _Stats:
         retval.append('    trunk : %d\n' % count)
       else:
         retval.append('    \'%s\' : %d\n' % (symbol.name, count))
-    if self.branch_blockers:
-      blockers = list(self.branch_blockers)
-      blockers.sort()
-      retval.append('  blockers:\n')
-      for blocker in blockers:
-        retval.append('    \'%s\'\n' % (blocker,))
     return ''.join(retval)
 
 
@@ -271,7 +223,7 @@ class SymbolStatisticsCollector:
       return stats
 
   def register(self, cvs_file_items):
-    """Register the statistics for each symbol in CVS_FILE_ITEMS."""
+    """Register the possible parents for each symbol in CVS_FILE_ITEMS."""
 
     for lod_items in cvs_file_items.iter_lods():
       if lod_items.lod is not None:
@@ -291,9 +243,6 @@ class SymbolStatisticsCollector:
         if lod_items.cvs_branch is not None:
           branch_stats.register_branch_possible_parents(
               lod_items.cvs_branch, cvs_file_items)
-
-        if lod_items.is_pure_ntdb():
-          branch_stats.register_pure_ntdb()
 
       for cvs_tag in lod_items.cvs_tags:
         tag_stats = self[cvs_tag.symbol]
@@ -351,21 +300,13 @@ class SymbolStatistics:
     # development:
     self._stats = { }
 
-    # A map { LineOfDevelopment.id -> _Stats } for all lines of
-    # development:
-    self._stats_by_id = { }
-
     stats_list = cPickle.load(open(filename, 'rb'))
 
     for stats in stats_list:
       self._stats[stats.lod] = stats
-      self._stats_by_id[stats.lod.id] = stats
 
   def __len__(self):
     return len(self._stats)
-
-  def __getitem__(self, lod_id):
-    return self._stats_by_id[lod_id]
 
   def get_stats(self, lod):
     """Return the _Stats object for LineOfDevelopment instance LOD.
@@ -404,28 +345,23 @@ class SymbolStatistics:
     SYMBOLS is a map { name : Symbol } not including Trunk entries.  A
     branch can be blocked because it has another, non-excluded symbol
     that depends on it.  If any blocked excludes are found in SYMBOLS,
-    output error messages describing the situation and raise a
-    FatalError."""
+    output error messages describing the situation.  Return True if
+    any errors were found."""
 
     Log().quiet("Checking for blocked exclusions...")
 
     blocked_excludes = self._find_blocked_excludes(symbols)
     if not blocked_excludes:
-      return
+      return False
 
-    s = []
     for branch, branch_blockers in blocked_excludes.items():
-      s.append(
-          error_prefix + ": The branch '%s' cannot be "
-          "excluded because the following symbols depend "
-          "on it:\n" % (branch)
-          )
+      sys.stderr.write(error_prefix + ": The branch '%s' cannot be "
+                       "excluded because the following symbols depend "
+                       "on it:\n" % (branch))
       for blocker in branch_blockers:
-        s.append("    '%s'\n" % (blocker,))
-    s.append('\n')
-    Log().error(''.join(s))
-
-    raise FatalException()
+        sys.stderr.write("    '%s'\n" % (blocker))
+    sys.stderr.write("\n")
+    return True
 
   def _check_invalid_tags(self, symbols):
     """Check for commits on any symbols that are to be converted as tags.
@@ -433,7 +369,7 @@ class SymbolStatistics:
     SYMBOLS is a map { name : Symbol } not including Trunk entries.
     If there is a commit on a symbol, then it cannot be converted as a
     tag.  If any tags with commits are found, output error messages
-    describing the problems then raise a FatalException."""
+    describing the problems.  Return True iff any errors are found."""
 
     Log().quiet("Checking for forced tags with commits...")
 
@@ -446,86 +382,99 @@ class SymbolStatistics:
 
     if not invalid_tags:
       # No problems found:
-      return
+      return False
 
-    s = []
-    s.append(
-        error_prefix + ": The following branches cannot be "
-        "forced to be tags because they have commits:\n"
-        )
+    sys.stderr.write(error_prefix + ": The following branches cannot be "
+                     "forced to be tags because they have commits:\n")
     for tag in invalid_tags:
-      s.append("    '%s'\n" % (tag))
-    s.append('\n')
-    Log().error(''.join(s))
+      sys.stderr.write("    '%s'\n" % (tag))
+    sys.stderr.write("\n")
 
-    raise FatalException()
-
-  def _check_paths_disjoint(self, lods):
-    """Check that the SVN paths of all LODS are disjoint.
-
-    If not, describe the problem to Log().error() and raise a
-    FatalException."""
-
-    paths = [
-        lod.get_path()
-        for lod in lods
-        if not isinstance(lod, ExcludedSymbol)
-        ]
-    try:
-      verify_paths_disjoint(*paths)
-    except PathsNotDisjointException, e:
-      Log().error(str(e))
-      raise FatalException()
+    return True
 
   def check_consistency(self, lods):
     """Check the plan for how to convert symbols for consistency.
 
     LODS is an iterable of Trunk and TypedSymbol objects indicating
-    how each line of development is to be converted.  If any problems
-    are detected, describe the problem to Log().error() and raise a
-    FatalException."""
+    how each line of development is to be converted.  Return True iff
+    any problems were detected."""
+
+    # Keep track of which symbols have not yet been processed:
+    unprocessed_lods = set(self._stats.keys())
 
     # Create a map { symbol_name : Symbol } including only
     # non-excluded symbols:
     symbols_by_name = {}
     for lod in lods:
-      if isinstance(lod, IncludedSymbol):
-        # Symbol included; include it in the symbol check.
+      try:
+        unprocessed_lods.remove(lod)
+      except KeyError:
+        if lod in self._stats:
+          raise InternalError(
+              'Symbol %s appeared twice in the symbol conversion table'
+              % (lod,))
+        else:
+          raise InternalError('Symbol %s is unknown' % (lod,))
+
+      if isinstance(lod, Trunk):
+        # Trunk is not processed any further.
+        pass
+      elif isinstance(lod, ExcludedSymbol):
+        # Symbol excluded; don't process it any further.
+        pass
+      elif isinstance(lod, TypedSymbol):
+        # This is an included symbol.  Include it in the symbol check.
         symbols_by_name[lod.name] = lod
+      else:
+        raise InternalError('Symbol %s is of unexpected type' % (lod,))
 
-    # We want to do both consistency checks even if the first fails,
-    # so that the user gets as much feedback as possible.
-    error_found = False
-    try:
-      self._check_blocked_excludes(symbols_by_name)
-    except FatalException:
-      error_found = True
+    # Make sure that all symbols were processed:
+    if unprocessed_lods:
+        raise InternalError(
+            'The following symbols did not appear in the symbol conversion '
+            'table: %s'
+            % (', '.join([str(s) for s in unprocessed_lods]),))
 
-    try:
-      self._check_invalid_tags(symbols_by_name)
-    except FatalException:
-      error_found = True
-
-    try:
-      self._check_paths_disjoint(lods)
-    except FatalException:
-      error_found = True
-
-    if error_found:
-      raise FatalException(
-          'Please fix the above errors and restart CollateSymbolsPass'
-          )
+    # It is important that we not short-circuit here:
+    return (
+        self._check_blocked_excludes(symbols_by_name)
+        | self._check_invalid_tags(symbols_by_name)
+        )
 
   def exclude_symbol(self, symbol):
     """SYMBOL has been excluded; remove it from our statistics."""
 
     del self._stats[symbol]
-    del self._stats_by_id[symbol.id]
 
     # Remove references to this symbol from other statistics objects:
     for stats in self._stats.itervalues():
       stats.branch_blockers.discard(symbol)
       if symbol in stats.possible_parents:
         del stats.possible_parents[symbol]
+
+  def get_preferred_parents(self):
+    """Return the LinesOfDevelopment preferred as parents for each symbol.
+
+    Return a map {Symbol : LineOfDevelopment} giving the LOD that
+    appears most often as a possible parent for each symbol.  Do not
+    include entries for Trunk objects.  If a symbol has no possible
+    parents because it never exists as a CVSBranch or a CVSTag, then
+    the associated value is None."""
+
+    retval = {}
+    for stats in self._stats.itervalues():
+      if isinstance(stats.lod, Trunk):
+        # Trunk entries don't have any parents.
+        pass
+      else:
+        (parents, count) = stats.get_preferred_parents()
+        if not parents:
+          retval[stats.lod] = None
+        else:
+          parents = list(parents)
+          parents.sort()
+          retval[stats.lod] = parents[0]
+
+    return retval
 
 

@@ -19,233 +19,68 @@
 import os
 
 from cvs2svn_lib.boolean import *
-from cvs2svn_lib.common import path_join
+from cvs2svn_lib.common import path_split
+from cvs2svn_lib.key_generator import KeyGenerator
 from cvs2svn_lib.context import Ctx
 
 
-class CVSPath(object):
-  """Represent a CVS file or directory.
+class CVSFile(object):
+  """Represent a CVS file."""
 
-  Members:
-    ID -- (int) unique ID for this CVSPath.
-    PROJECT -- (Project) the project containing this CVSPath.
-    PARENT_DIRECTORY -- (CVSDirectory or None) the CVSDirectory
-        containing this CVSPath.
-    BASENAME -- (string) the base name of this CVSPath (no ',v').
-    ORDINAL -- (int) the order that this instance should be sorted
-        relative to other CVSPath instances.  This member is set based
-        on the ordering imposed by slow_compare() by CollectData after
-        all CVSFiles have been processed.  Comparisons of CVSPath
-        using __cmp__() simply compare the ordinals.
+  key_generator = KeyGenerator(1)
 
-  """
+  def __init__(self, id, project, filename, cvs_path,
+               executable, file_size, mode):
+    """Initialize a new CVSFile object.
 
-  __slots__ = [
-      'id',
-      'project',
-      'parent_directory',
-      'basename',
-      'ordinal',
-      ]
+    Arguments:
 
-  def __init__(self, id, project, parent_directory, basename):
-    self.id = id
+      ID          --> (int or None) unique id for this file.  If None, a new
+                      id is generated.
+      PROJECT     --> (Project) the project containing this file
+      FILENAME    --> (string) the filesystem path to the CVS file
+      CVS_PATH    --> (string) the canonical path within the CVS project (no
+                      'Attic', no ',v', forward slashes)
+      EXECUTABLE  --> (bool) True iff RCS file has executable bit set
+      FILE_SIZE   --> (long) size of the RCS file in bytes
+      MODE        --> (string or None) 'kkv', 'kb', etc.
+
+    CVS_PATH might contain an 'Attic' component if it should be
+    retained in the SVN repository; i.e., if the same filename exists
+    out of Attic and the --retain-conflicting-attic-files option was
+    specified."""
+
+    if id is None:
+      self.id = self.key_generator.gen_id()
+    else:
+      self.id = id
+
     self.project = project
-    self.parent_directory = parent_directory
-    self.basename = basename
-
-  def __getstate__(self):
-    """This method must only be called after ordinal has been set."""
-
-    return (
-        self.id, self.project.id,
-        self.parent_directory, self.basename,
-        self.ordinal,
-        )
-
-  def __setstate__(self, state):
-    (
-        self.id, project_id,
-        self.parent_directory, self.basename,
-        self.ordinal,
-        ) = state
-    self.project = Ctx()._projects[project_id]
-
-  def get_cvs_path(self):
-    """Return the canonical path within the Project.
-
-    The canonical path:
-
-    - Uses forward slashes
-
-    - Doesn't include ',v' for files
-
-    - This doesn't include the 'Attic' segment of the path unless the
-      file is to be left in an Attic directory in the SVN repository;
-      i.e., if a filename exists in and out of Attic and the
-      --retain-conflicting-attic-files option was specified.
-
-    """
-
-    if self.parent_directory is None:
-      return self.basename
-    else:
-      return path_join(self.parent_directory.cvs_path, self.basename)
-
-  cvs_path = property(get_cvs_path)
-
-  def _get_dir_components(self):
-    if self.parent_directory is None:
-      return [self.basename]
-    else:
-      retval = self.parent_directory._get_dir_components()
-      retval.extend(self.basename)
-      return retval
-
-  def __eq__(a, b):
-    return a.id == b.id
-
-  def slow_compare(a, b):
-    return (
-        # Sort first by project:
-        cmp(a.project, b.project)
-        # Then by directory components:
-        or cmp(a._get_dir_components(), b._get_dir_components())
-        )
-
-  def __cmp__(a, b):
-    """This method must only be called after ordinal has been set."""
-
-    return cmp(a.ordinal, b.ordinal)
-
-
-class CVSDirectory(CVSPath):
-  """Represent a CVS directory.
-
-  Members:
-
-    ID -- (int or None) unique id for this file.  If None, a new id is
-        generated.
-    PROJECT -- (Project) the project containing this file.
-    PARENT_DIRECTORY -- (CVSDirectory or None) the CVSDirectory containing
-        this CVSDirectory.
-    BASENAME -- (string) the base name of this CVSDirectory (no ',v').
-
-  """
-
-  __slots__ = []
-
-  def __init__(self, id, project, parent_directory, basename):
-    """Initialize a new CVSDirectory object."""
-
-    CVSPath.__init__(self, id, project, parent_directory, basename)
-
-  def get_filename(self):
-    """Return the filesystem path to this CVSPath in the CVS repository."""
-
-    if self.parent_directory is None:
-      return self.project.project_cvs_repos_path
-    else:
-      return os.path.join(
-          self.parent_directory.get_filename(), self.basename
-          )
-
-  filename = property(get_filename)
-
-  def __getstate__(self):
-    return CVSPath.__getstate__(self)
-
-  def __setstate__(self, state):
-    CVSPath.__setstate__(self, state)
-
-  def __str__(self):
-    """For convenience only.  The format is subject to change at any time."""
-
-    return self.cvs_path + '/'
-
-  def __repr__(self):
-    return 'CVSDirectory<%d>(%r)' % (self.id, str(self),)
-
-
-class CVSFile(CVSPath):
-  """Represent a CVS file.
-
-  Members:
-
-    ID -- (int) unique id for this file.
-    PROJECT -- (Project) the project containing this file.
-    PARENT_DIRECTORY -- (CVSDirectory) the CVSDirectory containing
-        this CVSFile.
-    BASENAME -- (string) the base name of this CVSFile (no ',v').
-    _IN_ATTIC -- (bool) True if RCS file is in an Attic subdirectory
-        that is not considered the parent directory.  (If a file is
-        in-and-out-of-attic and one copy is to be left in Attic after
-        the conversion, then the Attic directory is that file's
-        PARENT_DIRECTORY and _IN_ATTIC is False.)
-    EXECUTABLE -- (bool) True iff RCS file has executable bit set.
-    FILE_SIZE -- (long) size of the RCS file in bytes.
-    MODE -- (string or None) 'kkv', 'kb', etc.
-
-  PARENT_DIRECTORY might contain an 'Attic' component if it should be
-  retained in the SVN repository; i.e., if the same filename exists out
-  of Attic and the --retain-conflicting-attic-files option was specified.
-
-  """
-
-  __slots__ = [
-      '_in_attic',
-      'executable',
-      'file_size',
-      'mode',
-      ]
-
-  def __init__(
-        self, id, project, parent_directory, basename, in_attic,
-        executable, file_size, mode
-        ):
-    """Initialize a new CVSFile object."""
-
-    CVSPath.__init__(self, id, project, parent_directory, basename)
-    self._in_attic = in_attic
+    self.filename = filename
+    self.cvs_path = cvs_path
     self.executable = executable
     self.file_size = file_size
     self.mode = mode
 
-    assert self.parent_directory is not None
-
-  def get_filename(self):
-    """Return the filesystem path to this CVSPath in the CVS repository."""
-
-    if self._in_attic:
-      return os.path.join(
-          self.parent_directory.filename, 'Attic', self.basename + ',v'
-          )
-    else:
-      return os.path.join(
-          self.parent_directory.filename, self.basename + ',v'
-          )
-
-  filename = property(get_filename)
-
   def __getstate__(self):
-    return (
-        CVSPath.__getstate__(self),
-        self._in_attic, self.executable, self.file_size, self.mode,
-        )
+    return (self.id, self.project.id, self.filename, self.cvs_path,
+            self.executable, self.file_size, self.mode,)
 
   def __setstate__(self, state):
-    (
-        cvs_path_state,
-        self._in_attic, self.executable, self.file_size, self.mode,
-        ) = state
-    CVSPath.__setstate__(self, cvs_path_state)
+    (self.id, project_id, self.filename, self.cvs_path,
+     self.executable, self.file_size, self.mode,) = state
+    self.project = Ctx().projects[project_id]
+
+  def get_basename(self):
+    """Return the last path component of self.cvs_path."""
+
+    return path_split(self.cvs_path)[1]
+
+  basename = property(get_basename)
 
   def __str__(self):
     """For convenience only.  The format is subject to change at any time."""
 
     return self.cvs_path
-
-  def __repr__(self):
-    return 'CVSFile<%d>(%r)' % (self.id, str(self),)
 
 

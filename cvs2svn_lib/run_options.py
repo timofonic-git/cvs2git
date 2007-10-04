@@ -38,17 +38,13 @@ from cvs2svn_lib.common import FatalError
 from cvs2svn_lib.common import UTF8Encoder
 from cvs2svn_lib.log import Log
 from cvs2svn_lib.context import Ctx
-from cvs2svn_lib.svn_output_option import DumpfileOutputOption
-from cvs2svn_lib.svn_output_option import NewRepositoryOutputOption
-from cvs2svn_lib.svn_output_option import ExistingRepositoryOutputOption
+from cvs2svn_lib.output_option import DumpfileOutputOption
+from cvs2svn_lib.output_option import NewRepositoryOutputOption
+from cvs2svn_lib.output_option import ExistingRepositoryOutputOption
 from cvs2svn_lib.project import Project
 from cvs2svn_lib.pass_manager import InvalidPassError
-from cvs2svn_lib.revision_manager import NullRevisionRecorder
-from cvs2svn_lib.revision_manager import NullRevisionExcluder
-from cvs2svn_lib.rcs_revision_manager import RCSRevisionReader
-from cvs2svn_lib.cvs_revision_manager import CVSRevisionReader
-from cvs2svn_lib.checkout_internal import InternalRevisionRecorder
-from cvs2svn_lib.checkout_internal import InternalRevisionExcluder
+from cvs2svn_lib.revision_reader import RCSRevisionReader
+from cvs2svn_lib.revision_reader import CVSRevisionReader
 from cvs2svn_lib.checkout_internal import InternalRevisionReader
 from cvs2svn_lib.symbol_strategy import AllBranchRule
 from cvs2svn_lib.symbol_strategy import AllTagRule
@@ -57,9 +53,8 @@ from cvs2svn_lib.symbol_strategy import ExcludeRegexpStrategyRule
 from cvs2svn_lib.symbol_strategy import ForceBranchRegexpStrategyRule
 from cvs2svn_lib.symbol_strategy import ForceTagRegexpStrategyRule
 from cvs2svn_lib.symbol_strategy import HeuristicStrategyRule
+from cvs2svn_lib.symbol_strategy import RuleBasedSymbolStrategy
 from cvs2svn_lib.symbol_strategy import UnambiguousUsageRule
-from cvs2svn_lib.symbol_strategy import HeuristicPreferredParentRule
-from cvs2svn_lib.symbol_strategy import ManualRule
 from cvs2svn_lib.symbol_transform import RegexpSymbolTransform
 from cvs2svn_lib.property_setters import AutoPropsPropertySetter
 from cvs2svn_lib.property_setters import CVSBinaryFileDefaultMimeTypeSetter
@@ -115,7 +110,6 @@ history.
       --symbol-transform=P:S transform symbol names from P to S, where P and S
                              use Python regexp and reference syntax
                              respectively.  P must match the whole symbol name
-      --symbol-hints=PATH    read symbol conversion hints from PATH.
       --force-branch=REGEXP  force symbols matching REGEXP to be branches
       --force-tag=REGEXP     force symbols matching REGEXP to be tags
       --exclude=REGEXP       exclude branches and tags matching REGEXP
@@ -170,8 +164,6 @@ history.
       --help-passes          list the available passes and their numbers
   -v, --verbose              verbose (may be specified twice for debug output)
   -q, --quiet                quiet (may be specified twice for very quiet)
-      --write-symbol-info=PATH write information and statistics about CVS
-                             symbols to PATH.
       --skip-cleanup         prevent the deletion of intermediate files
       --profile              profile with 'hotshot' (into file cvs2svn.hotshot)
 """
@@ -193,8 +185,6 @@ class RunOptions:
     self.profiling = False
     self.progname = progname
 
-    self.projects = []
-
     try:
       self.opts, self.args = my_getopt(cmd_args, 'hvqs:p:', [
           "options=",
@@ -208,7 +198,6 @@ class RunOptions:
           "no-prune",
           "encoding=", "fallback-encoding=",
           "symbol-transform=",
-          "symbol-hints=",
           "force-branch=", "force-tag=", "exclude=", "symbol-default=",
           "no-cross-branch-commits",
           "retain-conflicting-attic-files",
@@ -228,7 +217,6 @@ class RunOptions:
 
           "version", "help", "help-passes",
           "verbose", "quiet",
-          "write-symbol-info=",
           "skip-cleanup",
           "profile",
 
@@ -237,7 +225,7 @@ class RunOptions:
           "dump-only", "create", "no-default-eol", "auto-props-ignore-case",
           ])
     except getopt.GetoptError, e:
-      Log().error('%s: %s\n\n' % (error_prefix, e))
+      sys.stderr.write(error_prefix + ': ' + str(e) + '\n\n')
       self.usage()
       sys.exit(1)
 
@@ -277,13 +265,6 @@ class RunOptions:
 
     # Check for problems with the options:
     self.check_options()
-
-  def add_project(self, project):
-    """Add a project to be converted."""
-
-    assert project.id is None
-    project.id = len(self.projects)
-    self.projects.append(project)
 
   def process_help_options(self):
     """Process any help-type options."""
@@ -359,6 +340,8 @@ class RunOptions:
     force_tag = False
     symbol_transforms = []
 
+    ctx.symbol_strategy = RuleBasedSymbolStrategy()
+
     for opt, value in self.opts:
       if opt  in ['-s', '--svnrepos']:
         target = value
@@ -386,16 +369,14 @@ class RunOptions:
         encodings.insert(-1, value)
       elif opt == '--fallback-encoding':
         fallback_encoding = value
-      elif opt == '--symbol-hints':
-        ctx.symbol_strategy_rules.append(ManualRule(value))
       elif opt == '--force-branch':
-        ctx.symbol_strategy_rules.append(ForceBranchRegexpStrategyRule(value))
+        ctx.symbol_strategy.add_rule(ForceBranchRegexpStrategyRule(value))
         force_branch = True
       elif opt == '--force-tag':
-        ctx.symbol_strategy_rules.append(ForceTagRegexpStrategyRule(value))
+        ctx.symbol_strategy.add_rule(ForceTagRegexpStrategyRule(value))
         force_tag = True
       elif opt == '--exclude':
-        ctx.symbol_strategy_rules.append(ExcludeRegexpStrategyRule(value))
+        ctx.symbol_strategy.add_rule(ExcludeRegexpStrategyRule(value))
       elif opt == '--symbol-default':
         if value not in ['branch', 'tag', 'heuristic', 'strict']:
           raise FatalError(
@@ -448,8 +429,6 @@ class RunOptions:
         keywords_off = True
       elif opt == '--tmpdir':
         ctx.tmpdir = value
-      elif opt == '--write-symbol-info':
-        ctx.symbol_info_filename = value
       elif opt == '--skip-cleanup':
         ctx.skip_cleanup = True
       elif opt == '--svnadmin':
@@ -462,17 +441,13 @@ class RunOptions:
         ctx.sort_executable = value
       elif opt == '--dump-only':
         dump_only = True
-        Log().error(
-            warning_prefix +
+        sys.stderr.write(warning_prefix +
             ': The --dump-only option is deprecated (it is implied\n'
-            'by --dumpfile).\n'
-            )
+            'by --dumpfile).\n')
       elif opt == '--create':
-        Log().error(
-            warning_prefix +
+        sys.stderr.write(warning_prefix +
             ': The behaviour produced by the --create option is now the '
-            'default,\nand passing the option is deprecated.\n'
-            )
+            'default,\nand passing the option is deprecated.\n')
 
     # Consistency check for options and arguments.
     if len(self.args) == 0:
@@ -480,7 +455,8 @@ class RunOptions:
       sys.exit(1)
 
     if len(self.args) > 1:
-      Log().error(error_prefix + ": must pass only one CVS repository.\n")
+      sys.stderr.write(error_prefix +
+                       ": must pass only one CVS repository.\n")
       self.usage()
       sys.exit(1)
 
@@ -541,27 +517,18 @@ class RunOptions:
       ctx.output_option = DumpfileOutputOption(dumpfile)
 
     if use_rcs:
-      ctx.revision_recorder = NullRevisionRecorder()
-      ctx.revision_excluder = NullRevisionExcluder()
       ctx.revision_reader = RCSRevisionReader(co_executable)
     elif use_cvs:
-      ctx.revision_recorder = NullRevisionRecorder()
-      ctx.revision_excluder = NullRevisionExcluder()
       ctx.revision_reader = CVSRevisionReader(cvs_executable)
     else:
       # --use-internal-co is the default:
-      ctx.revision_recorder = InternalRevisionRecorder(compress=True)
-      ctx.revision_excluder = InternalRevisionExcluder()
       ctx.revision_reader = InternalRevisionReader(compress=True)
 
     # Create the default project (using ctx.trunk, ctx.branches, and
     # ctx.tags):
-    self.add_project(
-        Project(
-            cvsroot, trunk_base, branches_base, tags_base,
-            symbol_transforms=symbol_transforms
-            )
-        )
+    ctx.add_project(Project(
+        cvsroot, trunk_base, branches_base, tags_base,
+        symbol_transforms=symbol_transforms))
 
     try:
       ctx.utf8_encoder = UTF8Encoder(encodings, fallback_encoding)
@@ -570,22 +537,18 @@ class RunOptions:
     except LookupError, e:
       raise FatalError(str(e))
 
-    ctx.symbol_strategy_rules.append(UnambiguousUsageRule())
+    ctx.symbol_strategy.add_rule(UnambiguousUsageRule())
     if symbol_strategy_default == 'strict':
       pass
     elif symbol_strategy_default == 'branch':
-      ctx.symbol_strategy_rules.append(AllBranchRule())
+      ctx.symbol_strategy.add_rule(AllBranchRule())
     elif symbol_strategy_default == 'tag':
-      ctx.symbol_strategy_rules.append(AllTagRule())
+      ctx.symbol_strategy.add_rule(AllTagRule())
     elif symbol_strategy_default == 'heuristic':
-      ctx.symbol_strategy_rules.append(BranchIfCommitsRule())
-      ctx.symbol_strategy_rules.append(HeuristicStrategyRule())
+      ctx.symbol_strategy.add_rule(BranchIfCommitsRule())
+      ctx.symbol_strategy.add_rule(HeuristicStrategyRule())
     else:
       assert False
-
-    # Now add a rule whose job it is to pick the preferred parents of
-    # branches and tags:
-    ctx.symbol_strategy_rules.append(HeuristicPreferredParentRule())
 
     if auto_props_file:
       ctx.svn_property_setters.append(AutoPropsPropertySetter(
@@ -629,7 +592,7 @@ class RunOptions:
     if ctx.output_option is not None:
       ctx.output_option.check()
 
-    if not self.projects:
+    if not ctx.projects:
       raise FatalError('No project specified.')
 
   def get_options(self, *names):
@@ -660,22 +623,18 @@ class RunOptions:
 
     if self.opts or self.args:
       if self.opts:
-        Log().error(
+        sys.stderr.write(
             '%s: The following options cannot be used in combination with '
             'the --options\n'
             'option:\n'
             '    %s\n'
-            % (
-                error_prefix,
-                '\n    '.join([opt for (opt,value) in self.opts])
-                )
-            )
+            % (error_prefix,
+               '\n    '.join([opt for (opt,value) in self.opts])))
       if self.args:
-        Log().error(
+        sys.stderr.write(
             '%s: No cvs-repos-path arguments are allowed with the --options '
             'option.\n'
-            % (error_prefix,)
-            )
+            % (error_prefix,))
       sys.exit(1)
 
   def process_options_file(self, options_filename):
@@ -691,7 +650,7 @@ class RunOptions:
     execfile(options_filename, g, l)
 
   def usage(self):
-    Log().write(usage_message_template % {
+    sys.stdout.write(usage_message_template % {
         'progname' : self.progname,
         'trunk_base' : config.DEFAULT_TRUNK_BASE,
         'branches_base' : config.DEFAULT_BRANCHES_BASE,

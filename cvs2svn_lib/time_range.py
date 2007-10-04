@@ -22,9 +22,7 @@ from __future__ import generators
 from cvs2svn_lib.boolean import *
 
 
-class TimeRange(object):
-  __slots__ = ('t_min', 't_max')
-
+class TimeRange:
   def __init__(self):
     # Start out with a t_min higher than any incoming time T, and a
     # t_max lower than any incoming T.  This way the first T will push

@@ -17,7 +17,6 @@
 """This module contains common facilities used by cvs2svn."""
 
 
-import re
 import time
 import codecs
 
@@ -51,8 +50,8 @@ class FatalException(Exception):
   """Exception thrown on a non-recoverable error.
 
   If this exception is thrown by main(), it is caught by the global
-  layer of the program, its string representation is printed (followed
-  by a newline), and the program is ended with an exit code of 1."""
+  layer of the program, its string representation is printed, and the
+  program is ended with an exit code of 1."""
 
   pass
 
@@ -67,9 +66,9 @@ class FatalError(FatalException):
   """A FatalException that prepends error_prefix to the message."""
 
   def __init__(self, msg):
-    """Use (error_prefix + ': ' + MSG) as the error message."""
+    """Use (error_prefix + ': ' + MSG + '\n') as the error message."""
 
-    FatalException.__init__(self, '%s: %s' % (error_prefix, msg,))
+    FatalException.__init__(self, '%s: %s\n' % (error_prefix, msg,))
 
 
 class CommandError(FatalError):
@@ -95,43 +94,6 @@ class CommandError(FatalError):
           % (self.command, self.exit_status))
 
 
-# Control characters (characters not allowed in Subversion filenames):
-ctrl_characters_regexp = re.compile('[\\\x00-\\\x1f\\\x7f]')
-
-
-def verify_svn_filename_legal(path, filename):
-  """Verify that FILENAME is a legal filename.
-
-  FILENAME is a path component of a CVS path.  Check that it won't
-  choke SVN:
-
-  - Check that it is not empty.
-
-  - Check that it is not equal to '.' or '..'.
-
-  - Check that the filename does not include any control characters.
-
-  If any of these tests fail, raise a FatalError.  PATH is the full
-  filesystem path from which FILENAME was derived; it can be used in
-  error messages."""
-
-  if filename == '':
-    raise FatalError("File %s would result in an empty filename." % (path,))
-
-  if filename in ['.', '..']:
-    raise FatalError(
-        "File %s would result in an illegal filename '%s'."
-        % (path, filename,)
-        )
-
-  m = ctrl_characters_regexp.search(filename)
-  if m:
-    raise FatalError(
-        "Character %r in filename %r is not supported by Subversion."
-        % (m.group(), filename,)
-        )
-
-
 def path_join(*components):
   """Join two or more pathname COMPONENTS, inserting '/' as needed.
   Empty component are skipped."""
@@ -154,101 +116,6 @@ def path_split(path):
     return ('', path,)
   else:
     return (path[:pos], path[pos+1:],)
-
-
-class PathRepeatedException(Exception):
-  def __init__(self, path, count):
-    self.path = path
-    self.count = count
-    Exception.__init__(
-        self, 'Path %s is repeated %d times' % (self.path, self.count,)
-        )
-
-
-class PathsNestedException(Exception):
-  def __init__(self, nest, nestlings):
-    self.nest = nest
-    self.nestlings = nestlings
-    Exception.__init__(
-        self,
-        'Path %s contains the following other paths: %s'
-        % (self.nest, ', '.join(self.nestlings),)
-        )
-
-
-class PathsNotDisjointException(FatalException):
-  """An exception that collects multiple other disjointness exceptions."""
-
-  def __init__(self, problems):
-    self.problems = problems
-    Exception.__init__(
-        self,
-        'The following paths are not disjoint:\n'
-        '    %s\n'
-        % ('\n    '.join([str(problem) for problem in self.problems]),)
-        )
-
-
-def verify_paths_disjoint(*paths):
-  """Verify that all of the paths in the argument list are disjoint.
-
-  If any of the paths is nested in another one (i.e., in the sense
-  that 'a/b/c/d' is nested in 'a/b'), or any two paths are identical,
-  raise a PathsNotDisjointException containing exceptions detailing
-  the individual problems."""
-
-  def split(path):
-    if not path:
-      return []
-    else:
-      return path.split('/')
-
-  def contains(split_path1, split_path2):
-    """Return True iff SPLIT_PATH1 contains SPLIT_PATH2."""
-
-    return (
-        len(split_path1) < len(split_path2)
-        and split_path2[:len(split_path1)] == split_path1
-        )
-
-  paths = [(split(path), path) for path in paths]
-  # If all overlapping elements are equal, a shorter list is
-  # considered "less than" a longer one.  Therefore if any paths are
-  # nested, this sort will leave at least one such pair adjacent, in
-  # the order [nest,nestling].
-  paths.sort()
-
-  problems = []
-
-  # Create exceptions for any repeated paths, and delete the repeats
-  # from the paths array:
-  i = 0
-  while i < len(paths):
-    split_path, path = paths[i]
-    j = i + 1
-    while j < len(paths) and split_path == paths[j][0]:
-      j += 1
-    if j - i > 1:
-      problems.append(PathRepeatedException(path, j - i))
-      # Delete all but the first copy:
-      del paths[i + 1:j]
-    i += 1
-
-  # Create exceptions for paths nested in each other:
-  i = 0
-  while i < len(paths):
-    split_path, path = paths[i]
-    j = i + 1
-    while j < len(paths) and contains(split_path, paths[j][0]):
-      j += 1
-    if j - i > 1:
-      problems.append(PathsNestedException(
-          path, [path2 for (split_path2, path2) in paths[i + 1:j]]
-          ))
-    i += 1
-
-  if problems:
-    raise PathsNotDisjointException(problems)
 
 
 def format_date(date):

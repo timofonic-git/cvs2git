@@ -19,15 +19,44 @@
 
 import re
 import os
+import stat
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib.context import Ctx
-from cvs2svn_lib.common import FatalError
 from cvs2svn_lib.common import path_join
 from cvs2svn_lib.common import path_split
-from cvs2svn_lib.common import verify_svn_filename_legal
-from cvs2svn_lib.common import verify_paths_disjoint
+from cvs2svn_lib.common import FatalError
 from cvs2svn_lib.log import Log
+from cvs2svn_lib.cvs_file import CVSFile
+
+
+def verify_paths_disjoint(*paths):
+  """Verify that all of the paths in the argument list are disjoint.
+
+  If any of the paths is nested in another one (i.e., in the sense
+  that 'a/b/c/d' is nested in 'a/b'), or any two paths are identical,
+  write an error message and exit."""
+
+  def split(path):
+    if not path:
+      return []
+    else:
+      return path.split('/')
+
+  paths = [(split(path), path) for path in paths]
+  # If all overlapping elements are equal, a shorter list is
+  # considered "less than" a longer one.  Therefore if any paths are
+  # nested, this sort will leave at least one such pair adjacent, in
+  # the order [nest,nestling].
+  paths.sort()
+  for i in range(1, len(paths)):
+    split_path1, path1 = paths[i - 1]
+    split_path2, path2 = paths[i]
+    if len(split_path1) <= len(split_path2) \
+       and split_path2[:len(split_path1)] == split_path1:
+      raise FatalError(
+          'paths "%s" and "%s" are not disjoint.' % (path1, path2,)
+          )
 
 
 def normalize_ttb_path(opt, path, allow_empty=False):
@@ -75,8 +104,8 @@ class Project(object):
     SYMBOL_TRANSFORMS is a list of SymbolTransform instances which
     will be used to transform any symbol names within this project."""
 
-    # A unique id for this project.  This field is filled in by
-    # RunOptions.add_project().
+    # A unique id for this project, also used as its index in
+    # Ctx().projects.  This field is filled in by Ctx.add_project().
     self.id = None
 
     self.project_cvs_repos_path = os.path.normpath(project_cvs_repos_path)
@@ -95,12 +124,17 @@ class Project(object):
     self.trunk_path = normalize_ttb_path(
         '--trunk', trunk_path, allow_empty=Ctx().trunk_only
         )
-    if not Ctx().trunk_only:
+    if Ctx().trunk_only:
+      self._unremovable_paths = [self.trunk_path]
+    else:
       self.branches_path = normalize_ttb_path('--branches', branches_path)
       self.tags_path = normalize_ttb_path('--tags', tags_path)
       verify_paths_disjoint(
           self.trunk_path, self.branches_path, self.tags_path
           )
+      self._unremovable_paths = [
+          self.trunk_path, self.branches_path, self.tags_path
+          ]
 
     # A list of transformation rules (regexp, replacement) applied to
     # symbol names in this project.
@@ -108,14 +142,6 @@ class Project(object):
       self.symbol_transforms = []
     else:
       self.symbol_transforms = symbol_transforms
-
-    # The ID of the Trunk instance for this Project.  This member is
-    # filled in during CollectRevsPass.
-    self.trunk_id = None
-
-    # The ID of the CVSDirectory representing the root directory of
-    # this project.  This member is filled in during CollectRevsPass.
-    self.root_cvs_directory_id = None
 
   def __eq__(self, other):
     return self.id == other.id
@@ -160,6 +186,113 @@ class Project(object):
 
   determine_repository_root = staticmethod(determine_repository_root)
 
+  ctrl_characters_regexp = re.compile('[\\\x00-\\\x1f\\\x7f]')
+
+  def verify_filename_legal(path, filename):
+    """Verify that FILENAME is a legal filename.
+
+    FILENAME is a path component of a CVS path.  Check that it won't
+    choke SVN:
+
+    - Check that it is not empty.
+
+    - Check that it is not equal to '.' or '..'.
+
+    - Check that the filename does not include any control characters.
+
+    If any of these tests fail, raise a FatalError.  PATH is the full
+    filesystem path from which FILENAME was derived; it can be used in
+    error messages."""
+
+    if filename == '':
+      raise FatalError(
+          "File %s would result in an empty filename." % (path,)
+          )
+
+    if filename in ['.', '..']:
+      raise FatalError(
+          "File %s would result in an illegal filename '%s'."
+          % (path, filename,)
+          )
+
+    m = Project.ctrl_characters_regexp.search(filename)
+    if m:
+      raise FatalError(
+          "Character %r in filename %r is not supported by Subversion."
+          % (m.group(), filename,))
+
+  verify_filename_legal = staticmethod(verify_filename_legal)
+
+  def _get_cvs_path(self, filename):
+    """Return the path to FILENAME relative to project_cvs_repos_path.
+
+    FILENAME is a filesystem name that has to be within
+    self.project_cvs_repos_path.  Return the filename relative to
+    self.project_cvs_repos_path, with ',v' striped off if present, and
+    with os.sep converted to '/'."""
+
+    (tail, n) = self.project_prefix_re.subn('', filename, 1)
+    if n != 1:
+      raise FatalError(
+          "Project._get_cvs_path: '%s' is not a sub-path of '%s'"
+          % (filename, self.project_cvs_repos_path,))
+    if tail.endswith(',v'):
+      tail = tail[:-2]
+    return tail.replace(os.sep, '/')
+
+  def is_file_in_attic(self, filename):
+    """Return True iff FILENAME is in an Attic subdirectory.
+
+    FILENAME is the filesystem path to a '*,v' file."""
+
+    dirname = os.path.dirname(filename)
+    (dirname2, basename2,) = os.path.split(dirname)
+    return basename2 == 'Attic' and self.project_prefix_re.match(dirname2)
+
+  def get_cvs_file(self, filename, leave_in_attic=False):
+    """Return a CVSFile describing the file with name FILENAME.
+
+    FILENAME must be a *,v file within this project.  The CVSFile is
+    assigned a new unique id.  All of the CVSFile information is
+    filled in except mode (which can only be determined by parsing the
+    file).
+
+    If LEAVE_IN_ATTIC is True, then leave the 'Attic' component in the
+    filename.  Otherwise, raise FileInAndOutOfAtticException if the
+    file is in Attic, and a file with the same filename appears
+    outside of Attic.
+
+    Raise FatalError if the resulting filename would not be legal in
+    SVN."""
+
+    self.verify_filename_legal(filename, os.path.basename(filename)[:-2])
+
+    if leave_in_attic or not self.is_file_in_attic(filename):
+      canonical_filename = filename
+    else:
+      (dirname, basename,) = os.path.split(filename)
+      # If this file also exists outside of the attic, it's a fatal error
+      non_attic_filename = os.path.join(os.path.dirname(dirname), basename)
+      if os.path.exists(non_attic_filename):
+        raise FileInAndOutOfAtticException(non_attic_filename, filename)
+
+      # drop the 'Attic' portion from the filename for the canonical name:
+      canonical_filename = non_attic_filename
+
+    file_stat = os.stat(filename)
+
+    # The size of the file in bytes:
+    file_size = file_stat[stat.ST_SIZE]
+
+    # Whether or not the executable bit is set:
+    file_executable = bool(file_stat[0] & stat.S_IXUSR)
+
+    # mode is not known, so we temporarily set it to None.
+    return CVSFile(
+        None, self, filename, self._get_cvs_path(canonical_filename),
+        file_executable, file_size, None
+        )
+
   def is_source(self, svn_path):
     """Return True iff SVN_PATH is a legitimate source for this project.
 
@@ -176,6 +309,11 @@ class Project(object):
       return True
 
     return False
+
+  def is_unremovable(self, svn_path):
+    """Return True iff the specified path must not be removed."""
+
+    return svn_path in self._unremovable_paths
 
   def get_trunk_path(self, *components):
     """Return the trunk path.
@@ -206,35 +344,16 @@ class Project(object):
         self.tags_path, tag_symbol.get_clean_name(), *components
         )
 
-  def transform_symbol(self, cvs_file, name, revision):
-    """Transform the symbol NAME.
-
-    NAME refers to revision number REVISION in CVS_FILE.  REVISION is
-    the CVS revision number as a string, with zeros removed (e.g.,
-    '1.7' or '1.7.2').  Use the renaming rules specified with
-    --symbol-transform to possibly rename the symbol.  Return the
-    transformed symbol name, or the original name if it should not be
-    transformed."""
+  def transform_symbol(self, cvs_file, name):
+    """Transform the symbol NAME using the renaming rules specified
+    with --symbol-transform.  Return the transformed symbol name."""
 
     for symbol_transform in self.symbol_transforms:
-      newname = symbol_transform.transform(cvs_file, name, revision)
-      if newname is None:
-        Log().warn(
-            "   symbol '%s'=%s ignored in %s"
-            % (name, revision, cvs_file.filename,)
-            )
-        # Don't continue with other symbol transforms:
-        return None
-      elif newname != name:
-        Log().warn(
-            "   symbol '%s'=%s transformed to '%s' in %s"
-            % (name, revision, newname, cvs_file.filename,)
-            )
+      newname = symbol_transform.transform(cvs_file, name)
+      if newname != name:
+        Log().warn("   symbol '%s' transformed to '%s'" % (name, newname))
         name = newname
 
     return name
-
-  def __str__(self):
-    return self.trunk_path
 
 

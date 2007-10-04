@@ -24,9 +24,7 @@ from cvs2svn_lib.set_support import *
 from cvs2svn_lib.common import FatalError
 from cvs2svn_lib.common import error_prefix
 from cvs2svn_lib.log import Log
-from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.symbol import Trunk
-from cvs2svn_lib.symbol import TypedSymbol
 from cvs2svn_lib.symbol import Branch
 from cvs2svn_lib.symbol import Tag
 from cvs2svn_lib.symbol import ExcludedSymbol
@@ -35,25 +33,22 @@ from cvs2svn_lib.symbol import ExcludedSymbol
 class StrategyRule:
   """A single rule that might determine how to convert a symbol."""
 
-  def get_symbol(self, symbol, stats):
+  def get_symbol(self, stats):
     """Return an object describing what to do with the symbol in STATS.
 
-    SYMBOL holds a Symbol object as it has been determined so far.
-    Initially it is a naked Symbol instance, but hopefully one of
-    these method calls will turn it into a TypedSymbol.
+    If this rule applies to the symbol whose statistics are collected
+    in STATS, then return an object of type Branch, Tag, or
+    ExcludedSymbol as appropriate.  If this rule doesn't apply, return
+    None."""
 
-    If this rule applies to the symbol (whose statistics are collected
-    in STATS), then return the appropriate TypedSymbol object.  If
-    this rule doesn't apply, return SYMBOL unchanged."""
-
-    raise NotImplementedError()
+    raise NotImplementedError
 
 
 class _RegexpStrategyRule(StrategyRule):
   """A Strategy rule that bases its decisions on regexp matches.
 
   If self.regexp matches a symbol name, return self.action(symbol);
-  otherwise, return the symbol unchanged."""
+  otherwise, return None."""
 
   def __init__(self, pattern, action):
     """Initialize a _RegexpStrategyRule.
@@ -67,7 +62,7 @@ class _RegexpStrategyRule(StrategyRule):
     ExcludedSymbol.
 
     If PATTERN matches a symbol name, then get_symbol() returns
-    ACTION(name, id); otherwise it returns SYMBOL unchanged."""
+    ACTION(name, id); otherwise it returns None."""
 
     try:
       self.regexp = re.compile('^' + pattern + '$')
@@ -76,13 +71,11 @@ class _RegexpStrategyRule(StrategyRule):
 
     self.action = action
 
-  def get_symbol(self, symbol, stats):
-    if isinstance(symbol, TypedSymbol):
-      return symbol
-    elif self.regexp.match(symbol.name):
-      return self.action(symbol)
+  def get_symbol(self, stats):
+    if self.regexp.match(stats.lod.name):
+      return self.action(stats.lod)
     else:
-      return symbol
+      return None
 
 
 class ForceBranchRegexpStrategyRule(_RegexpStrategyRule):
@@ -109,33 +102,29 @@ class ExcludeRegexpStrategyRule(_RegexpStrategyRule):
 class UnambiguousUsageRule(StrategyRule):
   """If a symbol is used unambiguously as a tag/branch, convert it as such."""
 
-  def get_symbol(self, symbol, stats):
-    if isinstance(symbol, TypedSymbol):
-      return symbol
+  def get_symbol(self, stats):
     is_tag = stats.tag_create_count > 0
     is_branch = stats.branch_create_count > 0 or stats.branch_commit_count > 0
     if is_tag and is_branch:
       # Can't decide
-      return symbol
+      return None
     elif is_branch:
-      return Branch(symbol)
+      return Branch(stats.lod)
     elif is_tag:
-      return Tag(symbol)
+      return Tag(stats.lod)
     else:
       # The symbol didn't appear at all:
-      return symbol
+      return None
 
 
 class BranchIfCommitsRule(StrategyRule):
   """If there was ever a commit on the symbol, convert it as a branch."""
 
-  def get_symbol(self, symbol, stats):
-    if isinstance(symbol, TypedSymbol):
-      return symbol
-    elif stats.branch_commit_count > 0:
-      return Branch(symbol)
+  def get_symbol(self, stats):
+    if stats.branch_commit_count > 0:
+      return Branch(stats.lod)
     else:
-      return symbol
+      return None
 
 
 class HeuristicStrategyRule(StrategyRule):
@@ -144,13 +133,11 @@ class HeuristicStrategyRule(StrategyRule):
   Whichever happened more often determines how the symbol is
   converted."""
 
-  def get_symbol(self, symbol, stats):
-    if isinstance(symbol, TypedSymbol):
-      return symbol
-    elif stats.tag_create_count >= stats.branch_create_count:
-      return Tag(symbol)
+  def get_symbol(self, stats):
+    if stats.tag_create_count >= stats.branch_create_count:
+      return Tag(stats.lod)
     else:
-      return Branch(symbol)
+      return Branch(stats.lod)
 
 
 class AllBranchRule(StrategyRule):
@@ -160,11 +147,8 @@ class AllBranchRule(StrategyRule):
   (including a general rule like UnambiguousUsageRule) and will
   therefore only apply to the symbols not handled earlier."""
 
-  def get_symbol(self, symbol, stats):
-    if isinstance(symbol, TypedSymbol):
-      return symbol
-    else:
-      return Branch(symbol)
+  def get_symbol(self, stats):
+    return Branch(stats.lod)
 
 
 class AllTagRule(StrategyRule):
@@ -177,162 +161,78 @@ class AllTagRule(StrategyRule):
   (including a general rule like UnambiguousUsageRule) and will
   therefore only apply to the symbols not handled earlier."""
 
-  def get_symbol(self, symbol, stats):
-    if isinstance(symbol, TypedSymbol):
-      return symbol
+  def get_symbol(self, stats):
+    return Tag(stats.lod)
+
+
+class SymbolStrategy:
+  """A strategy class, used to decide how to convert CVS symbols."""
+
+  def get_symbols(self, symbol_stats):
+    """Return a list of TypedSymbol objects telling how to convert symbols.
+
+    The list values are TypedSymbol objects (Branch, Tag, or
+    ExcludedSymbol), indicating how each symbol should be converted.
+    Trunk objects in SYMBOL_STATS should be passed through unchanged.
+    One object must be included in the return value for each line of
+    development described in SYMBOL_STATS.
+
+    Return None if there was an error."""
+
+    raise NotImplementedError
+
+
+class RuleBasedSymbolStrategy:
+  """A strategy that uses StrategyRules to decide what to do with a symbol.
+
+  To determine how a symbol is to be converted, first check the
+  StrategyRules in self._rules.  The first rule that applies
+  determines how the symbol is to be converted.  It is an error if
+  there are any symbols that are not covered by the rules."""
+
+  def __init__(self):
+    """Initialize an instance."""
+
+    # A list of StrategyRule objects, applied in order to determine
+    # how symbols should be converted.
+    self._rules = []
+
+  def add_rule(self, rule):
+    self._rules.append(rule)
+
+  def _get_symbol(self, stats):
+    if isinstance(stats.lod, Trunk):
+      return stats.lod
     else:
-      return Tag(symbol)
+      for rule in self._rules:
+        symbol = rule.get_symbol(stats)
+        if symbol is not None:
+          return symbol
+      else:
+        return None
 
+  def get_symbols(self, symbol_stats):
+    symbols = []
+    mismatches = []
+    for stats in symbol_stats:
+      symbol = self._get_symbol(stats)
+      if symbol is not None:
+        symbols.append(symbol)
+      else:
+        # None of the rules covered this symbol.
+        mismatches.append(stats)
 
-class HeuristicPreferredParentRule(StrategyRule):
-  """Use a heuristic rule to pick preferred parents.
-
-  Pick the parent that should be preferred for any TypedSymbols.  As
-  parent, use the symbol that appeared most often as a possible parent
-  of the symbol in question.  If multiple symbols are tied, choose the
-  one that comes first according to the Symbol class's natural sort
-  order."""
-
-  def _get_preferred_parent(self, stats):
-    """Return the LODs that are most often possible parents in STATS.
-
-    Return the set of LinesOfDevelopment that appeared most often as
-    possible parents.  The return value might contain multiple symbols
-    if multiple LinesOfDevelopment appeared the same number of times."""
-
-    best_count = -1
-    best_symbol = None
-    for (symbol, count) in stats.possible_parents.items():
-      if count > best_count or (count == best_count and symbol < best_symbol):
-        best_count = count
-        best_symbol = symbol
-
-    if best_symbol is None:
+    if mismatches:
+      sys.stderr.write(
+          error_prefix + ": It is not clear how the following symbols "
+          "should be converted.\n"
+          "Use --force-tag, --force-branch, --exclude, and/or "
+          "--symbol-default to\n"
+          "resolve the ambiguity.\n")
+      for stats in mismatches:
+        sys.stderr.write("    %s\n" % stats)
       return None
     else:
-      return best_symbol
-
-  def get_symbol(self, symbol, stats):
-    if isinstance(symbol, TypedSymbol) and symbol.preferred_parent_id is None:
-      preferred_parent = self._get_preferred_parent(stats)
-      if preferred_parent is None:
-        Log().debug('%s has no preferred parent' % (symbol,))
-      else:
-        symbol.preferred_parent_id = preferred_parent.id
-        Log().debug(
-            'The preferred parent of %s is %s' % (symbol, preferred_parent,)
-            )
-
-    return symbol
-
-
-class ManualRule(StrategyRule):
-  """Use manual symbol configurations read from a file.
-
-  The input file is line-oriented with the following format:
-
-      <project-id> <symbol-name> <conversion> [<parent-lod-name>]
-
-  Where the fields are separated by whitespace and
-
-      project-id -- the numerical id of the Project to which the
-          symbol belongs (numbered starting with 0).  This field can
-          be '.' if the rule is not project-specific.
-
-      symbol-name -- the name of the symbol being specified.
-
-      conversion -- how the symbol should be treated in the
-          conversion.  This is one of the following values: 'branch',
-          'tag', or 'exclude'.  This field can be '.' if the rule
-          shouldn't affect how the symbol is treated in the
-          conversion.
-
-      parent-lod-name -- the name of the LOD that should serve as this
-          symbol's parent.  This field can be omitted or '.'  if the
-          rule shouldn't affect the symbol's parent, or it can be
-          '.trunk.' to indicate that the symbol should sprout from the
-          project's trunk."""
-
-  comment_re = re.compile(r'^(\#|$)')
-
-  conversion_map = {
-      'branch' : Branch,
-      'tag' : Tag,
-      'exclude' : ExcludedSymbol,
-      '.' : None,
-      }
-
-  def __init__(self, filename):
-    self._hints = []
-
-    f = open(filename, 'r')
-    for l in f:
-      s = l.strip()
-      if self.comment_re.match(s):
-        continue
-      fields = s.split()
-      if len(fields) == 3:
-        [project_id, symbol_name, conversion] = fields
-        parent_lod_name = None
-      elif len(fields) == 4:
-        [project_id, symbol_name, conversion, parent_lod_name] = fields
-        if parent_lod_name == '.':
-          parent_lod_name = None
-      else:
-        raise FatalError(
-            'The following line in "%s" cannot be parsed:\n    "%s"' % (l,)
-            )
-
-      if project_id == '.':
-        project_id = None
-      else:
-        try:
-          project_id = int(project_id)
-        except ValueError:
-          raise FatalError(
-              'Illegal project_id in the following line:\n    "%s"' % (l,)
-              )
-
-      try:
-        conversion = self.conversion_map[conversion]
-      except KeyError:
-        raise FatalError(
-            'Illegal conversion in the following line:\n    "%s"' % (l,)
-            )
-
-      self._hints.append(
-          (project_id, symbol_name, conversion, parent_lod_name)
-          )
-
-  def get_symbol(self, symbol, stats):
-    if isinstance(symbol, Trunk):
-      return symbol
-
-    for (project_id, name, conversion, parent_lod_name) in self._hints:
-      if (project_id is None or project_id == stats.lod.project.id) \
-             and (name == stats.lod.name):
-        if conversion is not None:
-          symbol = conversion(symbol)
-
-        if parent_lod_name is None:
-          pass
-        elif parent_lod_name == '.trunk.':
-          symbol.preferred_parent_id = stats.lod.project.trunk_id
-        else:
-          # We only have the parent symbol's name; we have to find its
-          # id:
-          for pp in stats.possible_parents.keys():
-            if isinstance(pp, Trunk):
-              pass
-            elif pp.name == parent_lod_name:
-              symbol.preferred_parent_id = pp.id
-              break
-          else:
-            raise FatalError(
-                'Symbol named %s not among possible parents'
-                % (parent_lod_name,)
-                )
-
-    return symbol
+      return symbols
 
 

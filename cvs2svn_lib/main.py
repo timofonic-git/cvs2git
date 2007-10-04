@@ -27,6 +27,8 @@ except ImportError:
   pass
 
 from cvs2svn_lib.boolean import *
+from cvs2svn_lib import config
+from cvs2svn_lib.common import FatalException
 from cvs2svn_lib.common import FatalError
 from cvs2svn_lib.run_options import RunOptions
 from cvs2svn_lib.context import Ctx
@@ -83,10 +85,11 @@ def main(progname, cmd_args):
     if run_options.profiling:
       import hotshot
       prof = hotshot.Profile('cvs2svn.hotshot')
-      prof.runcall(pass_manager.run, run_options)
+      prof.runcall(
+          pass_manager.run, run_options.start_pass, run_options.end_pass)
       prof.close()
     else:
-      pass_manager.run(run_options)
+      pass_manager.run(run_options.start_pass, run_options.end_pass)
   finally:
     try:
       os.rmdir(os.path.join(ctx.tmpdir, 'cvs2svn.lock'))

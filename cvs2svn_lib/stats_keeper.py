@@ -22,7 +22,6 @@ includes a function to read a StatsKeeper from STATISTICS_FILE."""
 
 import time
 import cPickle
-from cStringIO import StringIO
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib.set_support import *
@@ -35,6 +34,15 @@ from cvs2svn_lib.cvs_item import CVSTag
 
 class StatsKeeper:
   def __init__(self):
+    self._cvs_revs_count = 0
+    self._cvs_branches_count = 0
+    self._cvs_tags_count = 0
+    # A set of tag_ids seen:
+    self._tag_ids = set()
+    # A set of branch_ids seen:
+    self._branch_ids = set()
+    self._repos_size = 0
+    self._repos_file_count = 0
     self._svn_rev_count = None
     self._first_rev_date = 1L<<32
     self._last_rev_date = 0
@@ -42,11 +50,7 @@ class StatsKeeper:
     self._start_time = 0
     self._end_time = 0
     self._stats_reflect_exclude = False
-    self.reset_cvs_rev_info()
-
-  def clear_duration_for_pass(self, pass_num):
-    if pass_num in self._pass_timings:
-      del self._pass_timings[pass_num]
+    self._repos_files = set()
 
   def log_duration_for_pass(self, duration, pass_num, pass_name):
     self._pass_timings[pass_num] = (pass_name, duration,)
@@ -61,21 +65,19 @@ class StatsKeeper:
     self._stats_reflect_exclude = value
 
   def reset_cvs_rev_info(self):
-    self._repos_file_count = 0
-    self._repos_size = 0
     self._cvs_revs_count = 0
     self._cvs_branches_count = 0
     self._cvs_tags_count = 0
-
-    # A set of tag_ids seen:
     self._tag_ids = set()
-
-    # A set of branch_ids seen:
     self._branch_ids = set()
 
-  def record_cvs_file(self, cvs_file):
-    self._repos_file_count += 1
-    self._repos_size += cvs_file.file_size
+  def _record_cvs_file(self, cvs_file):
+    # Only add the size if this is the first time we see the file.
+    if cvs_file.id not in self._repos_files:
+      self._repos_size += cvs_file.file_size
+    self._repos_files.add(cvs_file.id)
+
+    self._repos_file_count = len(self._repos_files)
 
   def _record_cvs_rev(self, cvs_rev):
     self._cvs_revs_count += 1
@@ -85,6 +87,8 @@ class StatsKeeper:
 
     if cvs_rev.timestamp > self._last_rev_date:
       self._last_rev_date = cvs_rev.timestamp
+
+    self._record_cvs_file(cvs_rev.cvs_file)
 
   def _record_cvs_branch(self, cvs_branch):
     self._cvs_branches_count += 1
@@ -113,83 +117,73 @@ class StatsKeeper:
   def __getstate__(self):
     state = self.__dict__.copy()
     # This can get kinda large, so we don't store it:
+    state['_repos_files'] = set()
     return state
 
   def archive(self):
     filename = artifact_manager.get_temp_file(config.STATISTICS_FILE)
-    f = open(filename, 'wb')
-    cPickle.dump(self, f)
-    f.close()
+    open(filename, 'wb').write(cPickle.dumps(self))
 
   def __str__(self):
-    f = StringIO()
-    f.write('\n')
-    f.write('cvs2svn Statistics:\n')
-    f.write('------------------\n')
-    f.write('Total CVS Files:        %10i\n' % (self._repos_file_count,))
-    f.write('Total CVS Revisions:    %10i\n' % (self._cvs_revs_count,))
-    f.write('Total CVS Branches:     %10i\n' % (self._cvs_branches_count,))
-    f.write('Total CVS Tags:         %10i\n' % (self._cvs_tags_count,))
-    f.write('Total Unique Tags:      %10i\n' % (len(self._tag_ids),))
-    f.write('Total Unique Branches:  %10i\n' % (len(self._branch_ids),))
-    f.write('CVS Repos Size in KB:   %10i\n' % ((self._repos_size / 1024),))
-
+    svn_revs_str = ""
     if self._svn_rev_count is not None:
-      f.write('Total SVN Commits:      %10i\n' % self._svn_rev_count)
+      svn_revs_str = ('Total SVN Commits:      %10s\n'
+                      % self._svn_rev_count)
 
-    f.write(
-        'First Revision Date:    %s\n' % (time.ctime(self._first_rev_date),)
-        )
-    f.write(
-        'Last Revision Date:     %s\n' % (time.ctime(self._last_rev_date),)
-        )
-    f.write('------------------')
-
+    caveat_str = ''
     if not self._stats_reflect_exclude:
-      f.write(
+      caveat_str = (
           '\n'
           '(These are unaltered CVS repository stats and do not\n'
-          ' reflect tags or branches excluded via --exclude)\n'
-          )
-
-    return f.getvalue()
-
-  def _get_timing_format(value):
-    # Output times with up to 3 decimal places:
-    decimals = max(0, 4 - len('%d' % int(value)))
-    length = len(('%%.%df' % decimals) % value)
-    return '%%%d.%df' % (length, decimals,)
-
-  _get_timing_format = staticmethod(_get_timing_format)
-
-  def single_pass_timing(self, pass_num):
-    (pass_name, duration,) = self._pass_timings[pass_num]
-    format = self._get_timing_format(duration)
-    time_string = format % (duration,)
-    return (
-        'Time for pass%d (%s): %s seconds.'
-        % (pass_num, pass_name, time_string,)
-        )
+          ' reflect tags or branches excluded via --exclude)\n')
+    return ('\n'                                \
+            'cvs2svn Statistics:\n'             \
+            '------------------\n'              \
+            'Total CVS Files:        %10i\n'    \
+            'Total CVS Revisions:    %10i\n'    \
+            'Total CVS Branches:     %10i\n'    \
+            'Total CVS Tags:         %10i\n'    \
+            'Total Unique Tags:      %10i\n'    \
+            'Total Unique Branches:  %10i\n'    \
+            'CVS Repos Size in KB:   %10i\n'    \
+            '%s'                                \
+            'First Revision Date:    %s\n'      \
+            'Last Revision Date:     %s\n'      \
+            '------------------'                \
+            '%s'
+            % (self._repos_file_count,
+               self._cvs_revs_count,
+               self._cvs_branches_count,
+               self._cvs_tags_count,
+               len(self._tag_ids),
+               len(self._branch_ids),
+               (self._repos_size / 1024),
+               svn_revs_str,
+               time.ctime(self._first_rev_date),
+               time.ctime(self._last_rev_date),
+               caveat_str,
+               ))
 
   def timings(self):
     passes = self._pass_timings.keys()
     passes.sort()
-    f = StringIO()
-    f.write('Timings (seconds):\n')
-    f.write('------------------\n')
+    output = 'Timings (seconds):\n------------------\n'
 
     total = self._end_time - self._start_time
 
-    format = self._get_timing_format(total)
+    # Output times with up to 3 decimal places:
+    decimals = max(0, 4 - len('%d' % int(total)))
+    length = len(('%%.%df' % decimals) % total)
+    format = '%%%d.%df' % (length, decimals,)
 
     for pass_num in passes:
       (pass_name, duration,) = self._pass_timings[pass_num]
-      f.write(
-          (format + '   pass%-2d   %s\n') % (duration, pass_num, pass_name,)
-          )
+      p_str = ((format + '   pass%-2d   %s\n')
+               % (duration, pass_num, pass_name,))
+      output += p_str
 
-    f.write((format + '   total') % total)
-    return f.getvalue()
+    output += ((format + '   total') % total)
+    return output
 
 
 def read_stats_keeper():
@@ -199,8 +193,6 @@ def read_stats_keeper():
   otherwise, create and return a new instance."""
 
   filename = artifact_manager.get_temp_file(config.STATISTICS_FILE)
-  f = open(filename, 'rb')
-  retval = cPickle.load(f)
-  f.close()
-  return retval
+  return cPickle.loads(open(filename, 'rb').read())
+
 

@@ -48,12 +48,11 @@ except ImportError:
 import anydbm
 if (anydbm._defaultmod.__name__ == 'dumbdbm'
     or anydbm._defaultmod.__name__ == 'dbm'):
-  Log().error(
-      error_prefix
-      + ': your installation of Python does not contain a suitable\n'
-      + 'DBM module -- cvs2svn cannot continue.\n'
-      + 'See http://python.org/doc/current/lib/module-anydbm.html to solve.\n'
-      )
+  sys.stderr.write(
+    error_prefix
+    + ': your installation of Python does not contain a suitable\n'
+    + 'DBM module -- cvs2svn cannot continue.\n'
+    + 'See http://python.org/doc/current/lib/module-anydbm.html to solve.\n')
   sys.exit(1)
 
 # 3. If we are using the old bsddb185 module, then try prefer gdbm instead.
@@ -63,15 +62,11 @@ if hasattr(anydbm._defaultmod, 'bsddb') \
   try:
     gdbm = __import__('gdbm')
   except ImportError:
-    Log().error(
-        warning_prefix +
-        ': The version of the bsddb module found\n'
-        'on your computer has been reported to malfunction on some '
-        'datasets,\n'
-        'causing KeyError exceptions.  You may wish to upgrade your Python '
-        'to\n'
-        'version 2.3 or later.\n'
-        )
+    sys.stderr.write(warning_prefix +
+        ': The version of the bsddb module found '
+        'on your computer has been reported to malfunction on some datasets, '
+        'causing KeyError exceptions. You may wish to upgrade your Python to '
+        'version 2.3 or later.\n')
   else:
     anydbm._defaultmod = gdbm
 
@@ -233,8 +228,7 @@ class IndexedDatabase:
       raise RuntimeError('Invalid mode %r' % self.mode)
 
     self.index_table = RecordTable(
-        self.index_filename, self.mode, FileOffsetPacker()
-        )
+        self.index_filename, self.mode, FileOffsetPacker())
 
     if self.mode == DB_OPEN_NEW:
       assert serializer is not None
@@ -273,26 +267,18 @@ class IndexedDatabase:
     except KeyError:
       return default
 
-  def get_many(self, indexes, default=None):
-    """Yield (index,item) tuples for INDEXES, in arbitrary order.
+  def get_many(self, indexes):
+    """Generate the items with the specified INDEXES in arbitrary order."""
 
-    Yield (index,default) for indexes with no defined values."""
-
-    offsets = []
-    for (index, offset) in self.index_table.get_many(indexes):
-      if offset is None:
-        yield (index, default)
-      else:
-        offsets.append((offset, index))
-
+    offsets = list(self.index_table.get_many(indexes))
     # Sort the offsets to reduce disk seeking:
     offsets.sort()
-    for (offset,index) in offsets:
-      yield (index, self._fetch(offset))
+    for offset in offsets:
+      yield self._fetch(offset)
 
   def __delitem__(self, index):
-    # We don't actually free the data in self.f.
-    del self.index_table[index]
+    self.index_table[index]
+    self.index_table[index] = 0
 
   def close(self):
     self.index_table.close()

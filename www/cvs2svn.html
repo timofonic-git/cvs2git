@@ -59,7 +59,7 @@ cvs2svn attempts to infer from CVS's incomplete information what
 second goal of cvs2svn is to reconstruct as much of your CVS
 repository's history as possible.</p>
 
-<h2><a name="features">cvs2svn features</a></h2>
+<h2>cvs2svn features</h2>
 
 <dl>
 
@@ -72,36 +72,20 @@ repository's history as possible.</p>
   <dd>CVS records modifications file-by-file, and does not keep track
     of what files were modified at the same time.  cvs2svn uses
     information like the file modification times, log messages, and
-    dependency information to deduce the original changesets.  cvs2svn
-    allows changesets that affect multiple branches and/or multiple
-    projects (as is allowed by CVS), or it can be configured to split
-    such changesets up into separate commits
-    (<tt>--no-cross-branch-commits</tt>; see also options file).</dd>
+    dependency information to reconstruct the original
+    changesets.</dd>
 
   <dt>Branch vs. tag</dt>
   <dd>CVS allows the same symbol name to be used sometimes as a
-    branch, sometimes as a tag.  cvs2svn has options and heuristics to
-    decide how to convert such "mixed" symbols
-    (<tt>--symbol-hints</tt>, <tt>--force-branch</tt>,
+    branch, sometimes as a tag.  cvs2svn has heuristics to decide how
+    to convert such "mixed" symbols (<tt>--force-branch</tt>,
     <tt>--force-tag</tt>, <tt>--symbol-default</tt>).</dd>
-
-  <dt>Branch/tag exclusion</dt>
-  <dd>cvs2svn allows the user to specify branches and/or tags that
-    should be excluded from the conversion altogether
-    (<tt>--symbol-hints</tt>, <tt>--exclude</tt>).  It checks that the
-    exclusions are self-consistent (e.g., it doesn't allow a branch to
-    be excluded if a branch that sprouts from it is not excluded).</dd>
-
-  <dt>Branch/tag renaming</dt>
-  <dd>cvs2svn can rename branches and tags during the conversion using
-    regular-expression patterns (<tt>--symbol-transform</tt>).</dd>
 
   <dt>Branch and tag parents</dt>
   <dd>In many cases, the CVS history is ambiguous about which branch
     served as the parent of another branch or tag.  cvs2svn determines
     the most plausible parent for symbols using cross-file
-    information.  You can override cvs2svn's choices on a case-by-case
-    basis by using the <tt>--symbol-hints</tt> option.</dd>
+    information.</dd>
 
   <dt>Branch and tag creation times</dt>
   <dd>CVS does not record when branches and tags are created.  cvs2svn
@@ -115,8 +99,8 @@ repository's history as possible.</p>
     (<tt>--mime-types</tt>, <tt>--auto-props</tt>).</dd>
 
   <dt>Binary vs. text</dt>
-  <dd>Many CVS users do not systematically record which files are
-    binary and which are text.  (This is mostly important if the
+  <dd>Many CVS repositories do not systematically record which files
+    are binary and which are text.  (This is mostly important if the
     repository is used on non-Unix systems.)  cvs2svn provides a
     number of ways to infer this information
     (<tt>--eol-from-mime-type</tt>, <tt>--default-eol</tt>,
@@ -126,8 +110,14 @@ repository's history as possible.</p>
   <dd>Subversion allows arbitrary text properties to be attached to
     files.  cvs2svn provides a mechanism to set such properties when a
     file is first added to the repository
-    (<tt>--auto-props</tt>) as well as a hook that users can use to
-    set arbitrary file properties via Python code.</dd>
+    (<tt>--auto-props</tt>).</dd>
+
+  <dt>Timestamp error correction</dt>
+  <dd>Many CVS repositories contain timestamp errors due to servers'
+    clocks being set incorrectly during part of the repository's
+    history.  cvs2svn's history reconstruction is relatively robust
+    against timestamp errors and it writes monotonic timestamps to the
+    Subversion repository.</dd>
 
   <dt>Subversion repository customization</dt>
   <dd>cvs2svn provides many options that allow you to customize the
@@ -141,69 +131,9 @@ repository's history as possible.</p>
   <dt>Support for multiple character encodings</dt>
   <dd>CVS does not record which character encoding was used to store
     metainformation like file names, author names and log messages.
-    cvs2svn provides options to help convert such text into UTF-8
-    (<tt>--encoding</tt>, <tt>--fallback-encoding</tt>).</dd>
-
-  <dt>Vendor branches</dt>
-  <dd>CVS supports "vendor branches", which (under some circumstances)
-    affect the contents of the main line of development.  cvs2svn
-    tries to detect vendor branches whenever possible, and explicitly
-    copies vendor branch contents to trunk so that a checkout of trunk
-    gives the same results under SVN as under CVS.  If a vendor branch
-    is excluded from the conversion, cvs2svn grafts the relevant
-    vendor branch revisions onto trunk.  cvs2svn also discards
-    spurious "1.1" revisions on files that were imported.</dd>
-
-  <dt>CVS quirks</dt>
-  <dd>cvs2svn goes to great length to deal with CVS's many quirks.
-    For example,
-    <ul>
-
-      <li>CVS introduces spurious "1.1" revisions when a file is added
-        on a branch.  cvs2svn discards these revisions.</li>
-
-      <li>If a file is added on a branch, CVS introduces a spurious
-        "dead" revision at the beginning of the branch to indicate
-        that the file did not exist when the branch was created.
-        cvs2svn deletes these spurious revisions and adds the file on
-        the branch at the correct time.</li>
-
-    </ul>
-  </dd>
-
-  <dt>Robust against repository corruption</dt>
-  <dd>cvs2svn knows how to handle several types of CVS repository
-    corruption that have been reported frequently, and gives
-    informative error messages in other cases:
-    <ul>
-
-      <li>An RCS file that exists both in and out of the "Attic"
-        directory.</li>
-
-      <li>Multiple deltatext blocks for a single CVS file
-        revision.</li>
-
-      <li>Multiple revision headers for the same CVS file
-        revision.</li>
-
-      <li>Tags that refer to non-existent revisions.</li>
-
-      <li>Branches that have no associated labels.</li>
-
-      <li>A directory name that conflicts with a file name (in or out
-        of the Attic).</li>
-
-      <li>Filenames that contain forbidden characters.</li>
-
-    </ul>
-  </dd>
-
-  <dt>Timestamp error correction</dt>
-  <dd>Many CVS repositories contain timestamp errors due to servers'
-    clocks being set incorrectly during part of the repository's
-    history.  cvs2svn's history reconstruction is relatively robust
-    against timestamp errors and it writes monotonic timestamps to the
-    Subversion repository.</dd>
+    cvs2svn provides options to convert this text into UTF-8 as used
+    by Subversion (<tt>--encoding</tt>,
+    <tt>--fallback-encoding</tt>).</dd>
 
   <dt>Scalable</dt>
   <dd>cvs2svn stores most intermediate data to on-disk databases so
@@ -474,14 +404,14 @@ when the file is checked out.  However, if line-end translation or
 keyword expansion is applied to a binary file, the file will usually
 be corrupted.</p>
 
-<p>CVS treats a file as text unless you specifically tell it that the
-file is binary.  You can tell CVS that a file is binary by using the
-command <tt>cvs admin -kb <i>filename</i></tt>.  But often CVS users
-forget to specify which files are binary, and as long as the
-repository is only used under Unix, they may never notice a problem,
-because the internal format of CVS is the same as the Unix format.
-But Subversion is not as forgiving as CVS if you tell it to treat a
-binary file as text.</p>
+<p>For this reason, CVS treats a file as binary unless you
+specifically tell it that the file is text.  You can tell CVS that a
+file is binary by using the command <tt>cvs admin -kb
+<i>filename</i></tt>.  But often CVS users forget to specify which
+files are binary, and as long as the repository is only used under
+Unix, they may never notice a problem, because the internal format of
+CVS is the same as the Unix format.  But Subversion is not as
+forgiving as CVS if you tell it to treat a binary file as text.</p>
 
 <p>If you have been conscientious about marking files as binary in
 CVS, then you should be able to use <tt>--default-eol=native</tt>.  If
@@ -578,8 +508,10 @@ this:</p>
 <h1><a name="symbols">Symbol handling</a></h1>
 
 <p>cvs2svn converts CVS tags and branches into Subversion tags and
-branches.  This section discusses issues related to symbol
-handling.</p>
+branches following the <a
+href="http://svnbook.red-bean.com/en/1.2/svn.branchmerge.using.html">standard
+Subversion convention</a>.  This section discusses issues related to
+symbol handling.</p>
 
 <p><strong>HINT:</strong> If there are problems with symbol usage in
 your repository, they are usually reported during
@@ -591,22 +523,6 @@ adjust the symbol-handling options then re-start cvs2svn starting at
 CollateSymbolsPass:</tt>".  This trick can save a lot of time if you
 have a large repository, as it might take a few iterations before you
 find the best set of options to convert your repository.</p>
-
-
-<h2><a name="symbol-layout">Placement of trunk, branches, and tags
-directories</a></h2>
-
-<p>cvs2svn converts CVS branches and tags into Subversion branches and
-tags following the <a
-href="http://svnbook.red-bean.com/en/1.2/svn.branchmerge.maint.html#svn.branchmerge.maint.layout">standard
-Subversion convention</a>.  For single-project conversions, the
-default is to put the trunk, branches, and tags directories at the top
-level of the repository tree, though this behavior can be changed by
-using the <tt>--trunk</tt>, <tt>--branches</tt>, and <tt>--tags</tt>
-options.  For multiproject conversions, you must specify the location
-of each project's trunk, branches, and tags directory in the options
-file, but you are encouraged to use the standard Subversion
-multiproject layout.</p>
 
 
 <h2><a name="symbol-exclusion">Excluding tags and branches</a></h2>
@@ -660,8 +576,8 @@ conversion.  The error message looks like this:</p>
 
 <pre>
    ERROR: It is not clear how the following symbols should be converted.
-   Use --symbol-hints, --force-tag, --force-branch, --exclude, and/or
-   --symbol-default to resolve the ambiguity.
+   Use --force-tag, --force-branch, --exclude, and/or --symbol-default to
+   resolve the ambiguity.
        'SYMBOL1' is a tag in 1 files, a branch in 2 files and has commits in 0 files
        'SYMBOL2' is a tag in 2 files, a branch in 1 files and has commits in 0 files
        'SYMBOL3' is a tag in 1 files, a branch in 2 files and has commits in 1 files
@@ -705,15 +621,6 @@ in CVS).  You can use the <tt>--force-branch</tt> and
 <tt>--force-tag</tt> options to specify the treatment of particular
 symbols, in combination with <tt>--symbol-default</tt> to specify the
 default to be used for other ambiguous symbols.</p>
-
-<p>Finally, you can have cvs2svn write a text file showing how each
-symbol was converted by using the <tt>--show-symbol-info</tt> option.
-If you disagree with any of cvs2svn's choices, you can make a copy of
-this file, edit it, then pass it to cvs2svn by using the
-<tt>--symbol-hints</tt> option.  In this manner you can influence how
-each symbol is converted and also the parent line of development of
-each symbol (the line of development from which the symbol
-sprouts).</p>
 
 <hr />
 
@@ -898,38 +805,6 @@ cvs2svn --symbol-transform='([0-9])-(.*):release-\1.\2' -s SVN RCS
   </tr>
 
   <tr>
-    <td align="right"><tt>--symbol-hints=PATH</tt></td>
-    <td><p>Read symbol conversion hints from PATH.  The format of PATH is
-      the same as the format output by <tt>--write-symbol-info</tt>,
-      namely a text file with four whitespace-separated columns:</p>
-
-<pre>
-project-id symbol conversion parent-lod-name
-</pre>
-
-      <p><i>project-id</i> is the numerical ID of the project to which
-      the symbol belongs, counting from 0.  <i>project-id</i> can be
-      set to '.' if project-specificity is not needed.
-      <i>symbol-name</i> is the name of the symbol being specified.
-      <i>conversion</i> specifies how the symbol should be converted,
-      and can be one of the values 'branch', 'tag', or 'exclude'.  If
-      <i>conversion</i> is '.', then this rule does not affect how the
-      symbol is converted.  <i>parent-lod-name</i> is the name of the
-      symbol from which this symbol should sprout, or '.trunk.' if the
-      symbol should sprout from trunk.  If <i>parent-lod-name</i> is
-      omitted or '.', then this rule does not affect the preferred
-      parent of this symbol.  The file may contain blank lines or
-      comment lines (lines whose first non-whitespace character is
-      '#').</p>
-
-      <p>The simplest way to use this option is to run the conversion
-      through CollateSymbolsPass with <tt>--write-symbol-info</tt>
-      option, copy the symbol info and edit it to create a hints file,
-      then re-start the conversion at <tt>CollateSymbolsPass</tt> with
-      this option enabled.</p></td>
-  </tr>
-
-  <tr>
     <td align="right"><tt>--force-branch=REGEXP</tt></td>
     <td>Force symbols whose names match REGEXP to be branches.</td>
   </tr>
@@ -963,9 +838,8 @@ project-id symbol conversion parent-lod-name
 
         <li>"<tt>strict</tt>": No default; every ambiguous
           symbol has to be resolved manually using
-          <tt>--symbol-hints</tt>, <tt>--force-branch</tt>,
-          <tt>--force-tag</tt>, or <tt>--exclude</tt>.  (This is the
-          default behavior.)</li>
+          <tt>--force-branch</tt>, <tt>--force-tag</tt>, or
+          <tt>--exclude</tt>.  (This is the default behavior.)</li>
 
       </ul>
     </td>
@@ -1204,12 +1078,6 @@ project-id symbol conversion parent-lod-name
     <td>Tell cvs2svn to operate in quiet mode, printing little more
       than pass starts and stops to STDOUT.  This option may be
       specified twice to suppress all non-error output.</td>
-  </tr>
-
-  <tr>
-    <td align="right"><tt>--write-symbol-info=PATH</tt></td>
-    <td>Write symbol statistics and information about how symbols were
-      converted to PATH during CollateSymbolsPass.</td>
   </tr>
 
   <tr>

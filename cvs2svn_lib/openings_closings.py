@@ -28,6 +28,7 @@ from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.artifact_manager import artifact_manager
 from cvs2svn_lib.symbol import Branch
 from cvs2svn_lib.svn_revision_range import SVNRevisionRange
+from cvs2svn_lib.symbol_filling_guide import get_source_set
 
 
 # Constants used in SYMBOL_OPENINGS_CLOSINGS
@@ -151,11 +152,6 @@ class SymbolingsReader:
     self.offsets = cPickle.load(offsets_db)
     offsets_db.close()
 
-  def close(self):
-    self.symbolings.close()
-    del self.symbolings
-    del self.offsets
-
   def _generate_lines(self, symbol):
     """Generate the lines for SYMBOL.
 
@@ -180,62 +176,73 @@ class SymbolingsReader:
 
         yield (revnum, type, cvs_symbol_id)
 
-  def get_range_map(self, svn_symbol_commit):
-    """Return the ranges of all CVSSymbols in SVN_SYMBOL_COMMIT.
+  def _get_range_map(self, symbol):
+    """Return the ranges of all CVSSymbols related to SYMBOL.
 
-    Return a map { CVSSymbol : SVNRevisionRange }."""
-
-    # A map { cvs_symbol_id : CVSSymbol }:
-    cvs_symbol_map = {}
-    for cvs_symbol in svn_symbol_commit.get_cvs_items():
-      cvs_symbol_map[cvs_symbol.id] = cvs_symbol
+    Return a map {cvs_symbol_id : SVNRevisionRange}."""
 
     range_map = {}
 
-    for (revnum, type, cvs_symbol_id) \
-            in self._generate_lines(svn_symbol_commit.symbol):
-      cvs_symbol = cvs_symbol_map.get(cvs_symbol_id)
-      if cvs_symbol is None:
-        # This CVSSymbol is not part of SVN_SYMBOL_COMMIT.
-        continue
-      range = range_map.get(cvs_symbol)
+    for (revnum, type, cvs_symbol_id) in self._generate_lines(symbol):
+      range = range_map.get(cvs_symbol_id)
       if type == OPENING:
         if range is not None:
           raise InternalError(
-              'Multiple openings logged for %r' % (cvs_symbol,)
+              'Multiple openings logged for %r'
+              % (Ctx()._cvs_items_db[cvs_symbol_id],)
               )
-        range_map[cvs_symbol] = SVNRevisionRange(
-            cvs_symbol.source_lod, revnum
-            )
+        range_map[cvs_symbol_id] = SVNRevisionRange(revnum)
       else:
         if range is None:
           raise InternalError(
-              'Closing precedes opening for %r' % (cvs_symbol,)
+              'Closing precedes opening for %r'
+              % (Ctx()._cvs_items_db[cvs_symbol_id],)
               )
         if range.closing_revnum is not None:
           raise InternalError(
-              'Multiple closings logged for %r' % (cvs_symbol,)
+              'Multiple closings logged for %r'
+              % (Ctx()._cvs_items_db[cvs_symbol_id],)
               )
         range.add_closing(revnum)
 
-    # Make sure that all CVSSymbols are accounted for, and adjust the
-    # closings to be not later than svn_symbol_commit.revnum.
-    for cvs_symbol in cvs_symbol_map.itervalues():
+    return range_map
+
+  def get_source_set(self, svn_symbol_commit, svn_revnum):
+    """Return the list of possible sources for SVN_SYMBOL_COMMIT.
+
+    SVN_SYMBOL_COMMIT is an SVNSymbolCommit instance and SVN_REVNUM is
+    an SVN revision number.  The symbol sources will contain all
+    openings and closings for CVSSymbols that occur in
+    SVN_SYMBOL_COMMIT.  SVN_REVNUM is only used for an internal
+    consistency check."""
+
+    symbol = svn_symbol_commit.symbol
+
+    range_map = self._get_range_map(svn_symbol_commit.symbol)
+
+    # A map {svn_path : SVNRevisionRange}:
+    openings_closings_map = {}
+
+    for cvs_symbol in svn_symbol_commit.get_cvs_items():
+      svn_path = cvs_symbol.source_lod.get_path(
+          cvs_symbol.cvs_file.cvs_path
+          )
       try:
-        range = range_map[cvs_symbol]
+        range = range_map[cvs_symbol.id]
       except KeyError:
         raise InternalError('No opening for %s' % (cvs_symbol,))
 
-      if range.opening_revnum >= svn_symbol_commit.revnum:
+      if range.opening_revnum >= svn_revnum:
         raise InternalError(
             'Opening in r%d not ready for %s in r%d'
-            % (range.opening_revnum, cvs_symbol, svn_symbol_commit.revnum,)
+            % (range.opening_revnum, cvs_symbol, svn_revnum,)
             )
 
-      if range.closing_revnum is not None \
-             and range.closing_revnum > svn_symbol_commit.revnum:
+      if range.closing_revnum > svn_revnum:
         range.closing_revnum = None
 
-    return range_map
+      openings_closings_map[svn_path] = range
+
+    return get_source_set(svn_symbol_commit.symbol, openings_closings_map)
 
 

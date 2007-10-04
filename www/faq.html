@@ -56,15 +56,11 @@
     contain both repo/path/file.txt,v and
     repo/path/Attic/file.txt,v".  What can I do?</a></li>
 
-  <li><a href="#gdbm-nfs">gdbm.error: (45, 'Operation not supported')</a></li>
-
-  <li><a href="#apple-single">When converting a CVS repository that
-    was used on a Macintosh, some files have incorrect contents in
-    SVN.</a></li>
-
   <li><a href="#rcsmissing">Using cvs2svn 1.3.x, I get an error "The
     command '['co', '-q', '-x,v', '-p1.1', '-kk',
     '/home/cvsroot/myfile,v']' failed" in pass 8.</a></li>
+
+  <li><a href="#gdbm-nfs">gdbm.error: (45, 'Operation not supported')</a></li>
 
 </ol>
 
@@ -179,7 +175,7 @@ repository?</a></h3>
 <p>cvs2svn supports multiproject conversions, but you have to use the
 <a href="cvs2svn.html#options-file-method">options file method</a> to
 start the conversion.  In your options file, you simply call
-<tt>run_options.add_project()</tt> once for each sub-project in your
+<tt>ctx.add_project()</tt> once for each sub-project in your
 repository.  For example, if your CVS repository has the layout:</p>
 
 <pre>
@@ -209,7 +205,7 @@ repository.  For example, if your CVS repository has the layout:</p>
 <p>then you need to have a section like this in your options file:</p>
 
 <pre>
-run_options.add_project(
+ctx.add_project(
     Project(
         'my/cvsrepo/project_a',
         'project_a/trunk',
@@ -220,7 +216,7 @@ run_options.add_project(
             ],
         )
     )
-run_options.add_project(
+ctx.add_project(
     Project(
         'my/cvsrepo/project_b',
         'project_b/trunk',
@@ -247,7 +243,7 @@ run_options.add_project(
   <p>or use an options file that defines a project like this:</p>
 
 <pre>
-run_options.add_project(
+ctx.add_project(
     Project(
         'my/cvsrepo/foo',
         'foo/trunk',
@@ -404,9 +400,9 @@ ctx.svn_property_setters.append(MyPropertySetter())
   <p>When a symbol is encountered, cvs2svn iterates through the list
     of <tt>SymbolTransform</tt> objects defined for the project.  For
     each one, it calls <tt>symbol_transform.transform(cvs_file,
-    symbol_name, revision)</tt>.  That method can return
-    any legal symbol name, which will be used in the conversion
-    instead of the original name.</p>
+    symbol_name)</tt>.  That method can return any legal symbol name,
+    which will be used in the conversion instead of the original
+    name.</p>
 
   <p>To use this feature, you will have to use an <a
     href="cvs2svn.html#options-file-method">options file</a> to start
@@ -425,12 +421,12 @@ class MySymbolTransform(RegexpSymbolTransform):
         self.path = path
         RegexpSymbolTransform.__init__(self, pattern, replacement)
 
-    def transform(self, cvs_file, symbol_name, revision):
+    def transform(self, cvs_file, symbol_name):
         # Is the file is within the path we are interested in?
         if cvs_file.cvs_path.startswith(path + '/'):
             # Yes -> Allow RegexpSymbolTransform to transform the symbol:
             return RegexpSymbolTransform.transform(
-                    self, cvs_file, symbol_name, revision)
+                    self, cvs_file, symbol_name)
         else:
             # No -> Return the symbol unchanged:
             return symbol_name
@@ -445,7 +441,7 @@ for subdir in ['project1', 'project2', 'project3']:
             r'%s-release-\1.\2' % subdir))
 
 # Now register the project, using our own symbol transforms:
-run_options.add_project(
+ctx.add_project(
     Project(
         'your_cvs_path',
         'trunk',
@@ -458,7 +454,7 @@ run_options.add_project(
     "release-3_12" to be transformed into a symbol named
     "project1-release-3.12", whereas if the same symbol appears under
     "project2" it will be transformed into
-    "project2-release-3.12".</p>
+    "project1-release-3.12".</p>
 
 
 <h3><a name="cvsnt" title="#cvsnt">How can I convert a CVSNT
@@ -583,6 +579,18 @@ system and convert it there.
 </p>
 
 
+<h3><a name="rcsmissing" title="#installrcs">Using cvs2svn 1.3.x, I
+    get an error "The command '['co', '-q', '-x,v', '-p1.1', '-kk',
+    '/home/cvsroot/myfile,v']' failed" in pass 8.</a></h3>
+
+<p>By default, cvs2svn uses the "co" program from RCS to read the
+contents of files in your archive.  (See the <a
+href="cvs2svn.html#reqs">requirements</a> section of the
+documentation.)  The solution to this problem is either to install
+RCS, or to ensure that CVS is installed and use cvs2svn's
+<a href="cvs2svn.html#use-cvs"><tt>--use-cvs</tt></a> option.
+</p>
+
 <h3><a name="gdbm-nfs" title="#gdbm-nfs">gdbm.error: (45, 'Operation
     not supported')</a></h3>
 
@@ -591,48 +599,6 @@ databases on an NFS partition.  Apparently gdbm does not support
 databases on NFS partitions.  The workaround is to use the
 <tt>--tmpdir</tt> option to choose a local partition for cvs2svn to
 write its temporary files.</p>
-
-<h3><a name="apple-single" title="#apple-single">When converting a CVS
-    repository that was used on a Macintosh, the contents of some
-    files are incorrect in SVN.</a></h3>
-
-<p>Some Macintosh CVS clients use a nonstandard trick to store the
-resource fork of files in CVS: instead of storing the file contents
-directly, store an <a
-href="http://rfc.net/rfc1740.html">AppleSingle</a> data stream
-containing both the data fork and resource fork.  When checking the
-file out, the client unpacks the AppleSingle data and writes the two
-forks separately to disk.  By default, cvs2svn treats the file
-contents literally, so when you check the file out of Subversion, the
-file contains the combined data in AppleSingle format rather than only
-the data fork of the file as expected.</p>
-
-<p>Subversion does not have any special facilities for dealing with
-Macintosh resource forks, so there is nothing cvs2svn can do to
-preserve both forks of your data.  However, sometimes the resource
-fork is not needed.  If you would like to discard the resource fork
-and only record the data fork in Subversion, then start your
-conversion using the <a
-href="cvs2svn.html#options-file-method">options file method</a> and
-set the following option to <tt>True</tt> in your options file:</p>
-
-<pre>
-      ctx.decode_apple_single = True
-</pre>
-
-<p>There is more information about this option in the comments in
-<tt>cvs2svn-example.options</tt>.</p>
-
-<h3><a name="rcsmissing" title="#installrcs">Using cvs2svn 1.3.x, I
-    get an error "The command '['co', '-q', '-x,v', '-p1.1', '-kk',
-    '/home/cvsroot/myfile,v']' failed" in pass 8.</a></h3>
-
-<p><i>What are you using cvs2svn version 1.3.x for anyway?
-Upgrade!</i></p>
-
-<p>But if you must, either install RCS, or ensure that CVS is
-installed and use cvs2svn's <a
-href="cvs2svn.html#use-cvs"><tt>--use-cvs</tt></a> option.</p>
 
 
 <h2>Getting help:</h2>
@@ -688,15 +654,14 @@ efficiently.</p>
 
 <p>The first question is whether the problem you are experiencing is
 caused by a cvs2svn bug at all.  A large fraction of reported "bugs"
-are caused by problems with the user's CVS repository, especially mild
-forms of repository corruption or <a href="#cvsnt">trying to convert a
-CVSNT repository with cvs2svn</a>.  Please also double-check the <a
-href="cvs2svn.html">manual</a> to be sure that you are using the
-command-line options correctly.</p>
+are caused by problems with the user's CVS repository, especially <a
+href="#cvsnt">trying to convert a CVSNT repository with cvs2svn</a>.
+Please also double-check the <a href="cvs2svn.html">manual</a> to be
+sure that you are using the command-line options correctly.</p>
 
-<p>A good way to localize potential repository corruption is to use
-the <tt>shrink_test_case.py</tt> script (which is located in the
-<tt>contrib</tt> directory of the cvs2svn source tree).  This script
+<p>A good way to locate potential repository corruption is to use the
+<tt>shrink_test_case.py</tt> script (which is located in the
+<tt>contrib</tt> directory of the cvs2svn source tree.  This script
 tries to find the minimum subset of files in your repository that
 still shows the same problem.  <b>Warning: Only apply this script to a
 backup copy of your repository, as it destroys the repository that it
@@ -731,8 +696,7 @@ message:</p>
   are using.  If you have modified cvs2svn, please tell us exactly
   what you have changed.</li>
 
-  <li>What platform are you using (Linux, BSD, Windows, etc.)?  What
-  python version (e.g., type <tt>python --version</tt>)?</li>
+  <li>What platform are you using (Linux, BSD, Windows, etc.)?</li>
 
   <li>What is the <em>exact command line</em> that you used to start
   the conversion?  If you used the <tt>--options</tt> option, please
