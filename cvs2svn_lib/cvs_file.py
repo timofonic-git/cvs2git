@@ -35,8 +35,7 @@ class CVSPath(object):
     parent_directory -- (CVSDirectory or None) the CVSDirectory
         containing this CVSPath.
 
-    basename -- (string) the base name of this CVSPath (no ',v').  The
-        basename of the root directory of a project is ''.
+    basename -- (string) the base name of this CVSPath (no ',v').
 
     ordinal -- (int) the order that this instance should be sorted
         relative to other CVSPath instances.  This member is set based
@@ -77,21 +76,6 @@ class CVSPath(object):
         ) = state
     self.project = Ctx()._projects[project_id]
 
-  def get_ancestry(self):
-    """Return a list of the CVSPaths leading from the root path to SELF.
-
-    Return the CVSPaths in a list, starting with
-    self.project.get_root_cvs_directory() and ending with self."""
-
-    ancestry = []
-    p = self
-    while p is not None:
-      ancestry.append(p)
-      p = p.parent_directory
-
-    ancestry.reverse()
-    return ancestry
-
   def get_cvs_path(self):
     """Return the canonical path within the Project.
 
@@ -108,17 +92,20 @@ class CVSPath(object):
 
     """
 
-    return path_join(*[p.basename for p in self.get_ancestry()[1:]])
+    if self.parent_directory is None:
+      return self.basename
+    else:
+      return path_join(self.parent_directory.cvs_path, self.basename)
 
   cvs_path = property(get_cvs_path)
 
   def _get_dir_components(self):
-    """Return a list containing the components of the path leading to SELF.
-
-    The return value contains the base names of all of the parent
-    directories (except for the root directory) and SELF."""
-
-    return [p.basename for p in self.get_ancestry()[1:]]
+    if self.parent_directory is None:
+      return [self.basename]
+    else:
+      retval = self.parent_directory._get_dir_components()
+      retval.extend(self.basename)
+      return retval
 
   def __eq__(a, b):
     return a.id == b.id

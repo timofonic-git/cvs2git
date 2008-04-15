@@ -128,40 +128,6 @@ class ExcludeRegexpStrategyRule(_RegexpStrategyRule):
     _RegexpStrategyRule.__init__(self, pattern, ExcludedSymbol)
 
 
-class ExcludeTrivialImportBranchRule(StrategyRule):
-  """If a symbol is a trivial import branch, exclude it.
-
-  A trivial import branch is defined to be a branch that only had a
-  single import on it (no other kinds of commits) in every file in
-  which it appeared.  In most cases these branches are worthless."""
-
-  def get_symbol(self, symbol, stats):
-    if isinstance(symbol, (Trunk, TypedSymbol)):
-      return symbol
-    if stats.tag_create_count == 0 \
-          and stats.branch_create_count == stats.trivial_import_count:
-      return ExcludedSymbol(symbol)
-    else:
-      return symbol
-
-
-class ExcludeVendorBranchRule(StrategyRule):
-  """If a symbol is a pure vendor branch, exclude it.
-
-  A pure vendor branch is defined to be a branch that only had imports
-  on it (no other kinds of commits) in every file in which it
-  appeared."""
-
-  def get_symbol(self, symbol, stats):
-    if isinstance(symbol, (Trunk, TypedSymbol)):
-      return symbol
-    if stats.tag_create_count == 0 \
-          and stats.branch_create_count == stats.pure_ntdb_count:
-      return ExcludedSymbol(symbol)
-    else:
-      return symbol
-
-
 class UnambiguousUsageRule(StrategyRule):
   """If a symbol is used unambiguously as a tag/branch, convert it as such."""
 
@@ -240,45 +206,58 @@ class AllTagRule(StrategyRule):
       return Tag(symbol)
 
 
-class TrunkPathRule(StrategyRule):
-  """Set the base path for Trunk."""
+class DefaultBasePathRule(StrategyRule):
+  """Set LOD base paths to their default values.
 
-  def __init__(self, trunk_path):
-    self.trunk_path = trunk_path
-
-  def get_symbol(self, symbol, stats):
-    if isinstance(symbol, Trunk) and symbol.base_path is None:
-      symbol.base_path = self.trunk_path
-
-    return symbol
-
-
-class SymbolPathRule(StrategyRule):
-  """Set the base paths for symbol LODs."""
-
-  def __init__(self, symbol_type, base_path):
-    self.symbol_type = symbol_type
-    self.base_path = base_path
+  The default values are read from the trunk_path, branches_path, and
+  tags_path members of the Project containing the symbol.  If one of
+  these defaults is needed but unset, get_symbol() raises a
+  FatalError."""
 
   def get_symbol(self, symbol, stats):
-    if isinstance(symbol, self.symbol_type) and symbol.base_path is None:
-      symbol.base_path = path_join(self.base_path, symbol.name)
+    if not isinstance(symbol, LineOfDevelopment):
+      # This symbol will not be included in the conversion; skip it.
+      return symbol
+
+    if symbol.base_path is not None:
+      # This lod's base path is already set; leave it.
+      pass
+    elif isinstance(symbol, Trunk):
+      trunk_path = symbol.project.trunk_path
+
+      if trunk_path is None:
+        raise FatalError(
+            'DefaultBasePathRule used for trunk,\n'
+            'but project\'s trunk path is not set'
+            )
+
+      symbol.base_path = trunk_path
+    elif isinstance(symbol, Branch):
+      branches_path = symbol.project.branches_path
+
+      if branches_path is None:
+        raise FatalError(
+            'DefaultBasePathRule used for symbol %s,\n'
+            'but project\'s branch path is not set'
+            % (symbol,)
+            )
+
+      symbol.base_path = path_join(branches_path, symbol.name)
+    elif isinstance(symbol, Tag):
+      tags_path = symbol.project.tags_path
+
+      if tags_path is None:
+        raise FatalError(
+            'DefaultBasePathRule used for symbol %s,\n'
+            'but project\'s tag path is not set'
+            % (symbol,)
+            )
+
+      symbol.base_path = path_join(tags_path, symbol.name)
+    else:
+      raise NotImplementedError()
 
     return symbol
-
-
-class BranchesPathRule(SymbolPathRule):
-  """Set the base paths for Branch LODs."""
-
-  def __init__(self, branch_path):
-    SymbolPathRule.__init__(self, Branch, branch_path)
-
-
-class TagsPathRule(SymbolPathRule):
-  """Set the base paths for Tag LODs."""
-
-  def __init__(self, tag_path):
-    SymbolPathRule.__init__(self, Tag, tag_path)
 
 
 class HeuristicPreferredParentRule(StrategyRule):

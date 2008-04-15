@@ -38,11 +38,9 @@ from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.artifact_manager import artifact_manager
 from cvs2svn_lib.openings_closings import SymbolingsReader
 from cvs2svn_lib.symbol import Trunk
-from cvs2svn_lib.cvs_item import CVSRevisionAdd
-from cvs2svn_lib.cvs_item import CVSRevisionChange
+from cvs2svn_lib.cvs_item import CVSRevisionModification
 from cvs2svn_lib.cvs_item import CVSRevisionDelete
 from cvs2svn_lib.cvs_item import CVSRevisionNoop
-from cvs2svn_lib.cvs_item import CVSSymbol
 from cvs2svn_lib.output_option import OutputOption
 from cvs2svn_lib.svn_revision_range import RevisionScores
 
@@ -54,100 +52,6 @@ from cvs2svn_lib.svn_revision_range import RevisionScores
 # conflicts (though of course a conflict could still result if the
 # user requests symbol transformations).
 FIXUP_BRANCH_NAME = 'refs/heads/TAG.FIXUP'
-
-
-class GitRevisionWriter(object):
-  def register_artifacts(self, which_pass):
-    pass
-
-  def start(self):
-    pass
-
-  def _modify_file(self, f, cvs_item):
-    raise NotImplementedError()
-
-  def add_file(self, f, cvs_rev):
-    self._modify_file(f, cvs_rev)
-
-  def modify_file(self, f, cvs_rev):
-    self._modify_file(f, cvs_rev)
-
-  def delete_file(self, f, cvs_item):
-    f.write('D %s\n' % (cvs_item.cvs_file.cvs_path,))
-
-  def process_revision(self, f, cvs_rev):
-    if isinstance(cvs_rev, CVSRevisionAdd):
-      self.add_file(f, cvs_rev)
-    elif isinstance(cvs_rev, CVSRevisionChange):
-      self.modify_file(f, cvs_rev)
-    elif isinstance(cvs_rev, CVSRevisionDelete):
-      self.delete_file(f, cvs_rev)
-    elif isinstance(cvs_rev, CVSRevisionNoop):
-      pass
-    else:
-      raise InternalError('Unexpected CVSRevision type: %s' % (cvs_rev,))
-
-  def branch_file(self, f, cvs_symbol):
-    self._modify_file(f, cvs_symbol)
-
-  def finish(self):
-    pass
-
-
-class GitRevisionMarkWriter(GitRevisionWriter):
-  def _modify_file(self, f, cvs_item):
-    if cvs_item.cvs_file.executable:
-      mode = '100755'
-    else:
-      mode = '100644'
-
-    f.write(
-        'M %s :%d %s\n'
-        % (mode, cvs_item.revision_recorder_token,
-           cvs_item.cvs_file.cvs_path,)
-        )
-
-
-class GitRevisionInlineWriter(GitRevisionWriter):
-  def __init__(self, revision_reader):
-    self.revision_reader = revision_reader
-
-  def register_artifacts(self, which_pass):
-    GitRevisionWriter.register_artifacts(self, which_pass)
-    self.revision_reader.register_artifacts(which_pass)
-
-  def start(self):
-    GitRevisionWriter.start(self)
-    self.revision_reader.start()
-
-  def _modify_file(self, f, cvs_item):
-    if cvs_item.cvs_file.executable:
-      mode = '100755'
-    else:
-      mode = '100644'
-
-    f.write(
-        'M %s inline %s\n'
-        % (mode, cvs_item.cvs_file.cvs_path,)
-        )
-
-    cvs_rev = cvs_item
-    while isinstance(cvs_rev, CVSSymbol):
-      cvs_rev = Ctx()._cvs_items_db[cvs_rev.source_id]
-
-    # FIXME: We have to decide what to do about keyword substitution
-    # and eol_style here:
-    fulltext = self.revision_reader.get_content_stream(
-        cvs_rev, suppress_keyword_substitution=False
-        ).read()
-
-    f.write('data %d\n' % (len(fulltext),))
-    f.write(fulltext)
-    f.write('\n')
-
-  def finish(self):
-    GitRevisionWriter.finish(self)
-    self.revision_reader.finish()
 
 
 class GitOutputOption(OutputOption):
@@ -170,16 +74,12 @@ class GitOutputOption(OutputOption):
   # avoid conflicts with blob marks.
   _mark_offset = 1000000000
 
-  def __init__(self, dump_filename, revision_writer, author_transforms=None):
+  def __init__(self, dump_filename, author_transforms=None):
     """Constructor.
 
     DUMP_FILENAME is the name of the file to which the git-fast-import
     commands for defining revisions should be written.  (Please note
     that the actual file contents are not written to this file.)
-
-    REVISION_WRITER is a GitRevisionWriter that is used to output
-    either the content of revisions or a mark that was previously used
-    to label a blob.
 
     AUTHOR_TRANSFORMS is a map {cvsauthor : (fullname, email)} from
     CVS author names to git full name and email address.  All of the
@@ -205,8 +105,6 @@ class GitOutputOption(OutputOption):
         email = to_utf8(email)
         self.author_transforms[cvsauthor] = (name, email,)
 
-    self.revision_writer = revision_writer
-
   def register_artifacts(self, which_pass):
     # These artifacts are needed for SymbolingsReader:
     artifact_manager.register_temp_file_needed(
@@ -215,7 +113,6 @@ class GitOutputOption(OutputOption):
     artifact_manager.register_temp_file_needed(
         config.SYMBOL_OFFSETS_DB, which_pass
         )
-    self.revision_writer.register_artifacts(which_pass)
 
   def check(self):
     if Ctx().cross_project_commits:
@@ -246,8 +143,6 @@ class GitOutputOption(OutputOption):
     # numbers in which there was a commit to lod, and the
     # corresponding mark.
     self._marks = {}
-
-    self.revision_writer.start()
 
   def _create_commit_mark(self, lod, revnum):
     assert revnum >= self._youngest
@@ -299,7 +194,23 @@ class GitOutputOption(OutputOption):
     self.f.write('data %d\n' % (len(log_msg),))
     self.f.write('%s\n' % (log_msg,))
     for cvs_rev in svn_commit.get_cvs_items():
-      self.revision_writer.process_revision(self.f, cvs_rev)
+      if isinstance(cvs_rev, CVSRevisionNoop):
+        pass
+
+      elif isinstance(cvs_rev, CVSRevisionDelete):
+        self.f.write('D %s\n' % (cvs_rev.cvs_file.cvs_path,))
+
+      elif isinstance(cvs_rev, CVSRevisionModification):
+        if cvs_rev.cvs_file.executable:
+          mode = '100755'
+        else:
+          mode = '100644'
+
+        self.f.write(
+            'M %s :%d %s\n'
+            % (mode, cvs_rev.revision_recorder_token,
+               cvs_rev.cvs_file.cvs_path,)
+            )
 
     self.f.write('\n')
 
@@ -329,7 +240,26 @@ class GitOutputOption(OutputOption):
         % (self._get_source_mark(source_lod, svn_commit.revnum),)
         )
     for cvs_rev in svn_commit.cvs_revs:
-      self.revision_writer.process_revision(self.f, cvs_rev)
+      if isinstance(cvs_rev, CVSRevisionNoop):
+        pass
+
+      elif isinstance(cvs_rev, CVSRevisionDelete):
+        self.f.write('D %s\n' % (cvs_rev.cvs_file.cvs_path,))
+
+      elif isinstance(cvs_rev, CVSRevisionModification):
+        if cvs_rev.cvs_file.executable:
+          mode = '100755'
+        else:
+          mode = '100644'
+
+        self.f.write(
+            'M %s :%d %s\n'
+            % (mode, cvs_rev.revision_recorder_token,
+               cvs_rev.cvs_file.cvs_path,)
+            )
+
+      else:
+        raise InternalError('Unexpected CVSRevision type: %s' % (cvs_rev,))
 
     self.f.write('\n')
 
@@ -357,15 +287,7 @@ class GitOutputOption(OutputOption):
         lod_range_maps[range.source_lod] = lod_range_map
       lod_range_map[cvs_symbol] = range
 
-    # Sort the sources so that the branch that serves most often as
-    # parent is processed first:
-    lod_ranges = lod_range_maps.items()
-    lod_ranges.sort(
-        lambda (lod1,lod_range_map1),(lod2,lod_range_map2):
-        -cmp(len(lod_range_map1), len(lod_range_map2)) or cmp(lod1, lod2)
-        )
-
-    for (lod, lod_range_map) in lod_ranges:
+    for (lod, lod_range_map) in lod_range_maps.iteritems():
       while lod_range_map:
         revision_scores = RevisionScores(lod_range_map.values())
         (source_lod, revnum, score) = revision_scores.get_best_revnum()
@@ -406,7 +328,16 @@ class GitOutputOption(OutputOption):
 
     for (source_lod, source_revnum, cvs_symbols,) in source_groups:
       for cvs_symbol in cvs_symbols:
-        self.revision_writer.branch_file(self.f, cvs_symbol)
+        if cvs_symbol.cvs_file.executable:
+          mode = '100755'
+        else:
+          mode = '100644'
+
+        self.f.write(
+            'M %s :%d %s\n'
+            % (mode, cvs_symbol.revision_recorder_token,
+               cvs_symbol.cvs_file.cvs_path,)
+            )
 
     self.f.write('\n')
 
@@ -438,7 +369,6 @@ class GitOutputOption(OutputOption):
     self.f.write('\n')
 
   def cleanup(self):
-    self.revision_writer.finish()
     self.f.close()
     del self.f
     self._symbolings_reader.close()

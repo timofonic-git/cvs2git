@@ -146,22 +146,12 @@ class FillSource:
       return revision_ranges
 
   def get_subsources(self):
-    """Generate (CVSPath, FillSource) for all direct subsources."""
+    """Generate (cvs_path, FillSource) for all direct subsources."""
 
     if not isinstance(self._node_tree, SVNRevisionRange):
       for cvs_path, node in self._node_tree.items():
         fill_source = FillSource(cvs_path, self._symbol, node)
         yield (cvs_path, fill_source)
-
-  def get_subsource_map(self):
-    """Return the map {CVSPath : FillSource} of direct subsources."""
-
-    src_entries = {}
-
-    for (cvs_path, fill_subsource) in self.get_subsources():
-      src_entries[cvs_path] = fill_subsource
-
-    return src_entries
 
 
 def get_source_set(symbol, range_map):
@@ -174,7 +164,9 @@ def get_source_set(symbol, range_map):
   Use the SVNRevisionRanges from RANGE_MAP to create a FillSource
   instance describing the sources for filling SYMBOL."""
 
-  root_cvs_directory = symbol.project.get_root_cvs_directory()
+  root_cvs_directory = Ctx()._cvs_file_db.get_file(
+      symbol.project.root_cvs_directory_id
+      )
   fill_source = FillSource(root_cvs_directory, symbol, {})
 
   for cvs_symbol, svn_revision_range in range_map.items():

@@ -154,7 +154,7 @@ class SVNOutputOption(OutputOption):
         )
 
     for cvs_rev in svn_commit.cvs_revs:
-      trunk = cvs_rev.cvs_file.project.get_trunk()
+      trunk = Ctx()._symbol_db.get_symbol(cvs_rev.cvs_file.project.trunk_id)
       if isinstance(cvs_rev, CVSRevisionAdd):
         # Copy from branch to trunk:
         self.repos.copy_path(

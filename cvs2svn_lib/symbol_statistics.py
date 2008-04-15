@@ -73,10 +73,6 @@ class _Stats:
     branch_commit_count -- the number of files in which there were
         commits on this lod
 
-    trivial_import_count -- the number of files in which this branch
-        was purely a non-trunk default branch containing exactly one
-        revision.
-
     pure_ntdb_count -- the number of files in which this branch was
         purely a non-trunk default branch (consisting only of
         non-trunk default branch revisions).
@@ -94,7 +90,6 @@ class _Stats:
     self.branch_create_count = 0
     self.branch_commit_count = 0
     self.branch_blockers = set()
-    self.trivial_import_count = 0
     self.pure_ntdb_count = 0
     self.possible_parents = { }
 
@@ -120,11 +115,6 @@ class _Stats:
     symbol."""
 
     self.branch_blockers.add(blocker)
-
-  def register_trivial_import(self):
-    """Register that this branch is a trivial import branch in one file."""
-
-    self.trivial_import_count += 1
 
   def register_pure_ntdb(self):
     """Register that this branch is a pure import branch in one file."""
@@ -233,16 +223,10 @@ class _Stats:
 
   def __str__(self):
     return (
-        '\'%s\' is '
-        'a tag in %d files, '
-        'a branch in %d files, '
-        'a trivial import in %d files, '
-        'a pure import in %d files, '
-        'and has commits in %d files'
+        '\'%s\' is a tag in %d files, a branch in %d files, '
+        'a pure import in %d files, and has commits in %d files'
         % (self.lod, self.tag_create_count, self.branch_create_count,
-           self.trivial_import_count, self.pure_ntdb_count,
-           self.branch_commit_count)
-        )
+           self.pure_ntdb_count, self.branch_commit_count))
 
   def __repr__(self):
     retval = ['%s\n  possible parents:\n' % (self,)]
@@ -307,19 +291,18 @@ class SymbolStatisticsCollector:
         if lod_items.cvs_revisions:
           branch_stats.register_branch_commit()
 
-        if lod_items.is_trivial_import():
-          branch_stats.register_trivial_import()
+        for cvs_tag in lod_items.cvs_tags:
+          branch_stats.register_branch_blocker(cvs_tag.symbol)
 
-        if lod_items.is_pure_ntdb():
-          branch_stats.register_pure_ntdb()
-
-        for cvs_symbol in lod_items.iter_blockers():
-          branch_stats.register_branch_blocker(cvs_symbol.symbol)
+        for cvs_branch in lod_items.cvs_branches:
+          branch_stats.register_branch_blocker(cvs_branch.symbol)
 
         if lod_items.cvs_branch is not None:
           branch_stats.register_branch_possible_parents(
-              lod_items.cvs_branch, cvs_file_items
-              )
+              lod_items.cvs_branch, cvs_file_items)
+
+        if lod_items.is_pure_ntdb():
+          branch_stats.register_pure_ntdb()
 
       for cvs_tag in lod_items.cvs_tags:
         tag_stats = self[cvs_tag.symbol]

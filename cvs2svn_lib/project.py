@@ -56,17 +56,17 @@ class Project(object):
 
   def __init__(
         self, id, project_cvs_repos_path,
-        initial_directories=[],
+        trunk_path=None, branches_path=None, tags_path=None,
         symbol_transforms=None,
         ):
     """Create a new Project record.
 
     ID is a unique id for this project.  PROJECT_CVS_REPOS_PATH is the
     main CVS directory for this project (within the filesystem).
-
-    INITIAL_DIRECTORIES is an iterable of all SVN directories that
-    should be created when the project is first created.  Normally,
-    this should include the trunk, branches, and tags directory.
+    TRUNK_PATH, BRANCHES_PATH, and TAGS_PATH are the full, normalized
+    directory names in svn for the corresponding part of the
+    repository.  (BRANCHES_PATH and TAGS_PATH do not have to be
+    specified for a --trunk-only conversion.)
 
     SYMBOL_TRANSFORMS is an iterable of SymbolTransform instances
     which will be used to transform any symbol names within this
@@ -88,20 +88,28 @@ class Project(object):
         r'^' + re.escape(self.project_cvs_repos_path)
         + r'(' + re.escape(os.sep) + r'|$)')
 
-    # The SVN directories to add when the project is first created:
-    self._initial_directories = []
+    self.trunk_path = None
+    self.branches_path = None
+    self.tags_path = None
 
-    for path in initial_directories:
-      try:
-        path = normalize_svn_path(path, False)
-      except IllegalSVNPathError, e:
-        raise FatalError(
-            'Initial directory %r is not a legal SVN path: %s'
-            % (path, e,)
-            )
-      self._initial_directories.append(path)
+    paths_to_check = []
 
-    verify_paths_disjoint(*self._initial_directories)
+    if trunk_path is not None:
+      self.trunk_path = normalize_ttb_path(
+          '--trunk', trunk_path, allow_empty=True
+          )
+      paths_to_check.append(self.trunk_path)
+
+    if not Ctx().trunk_only:
+      if branches_path is not None:
+        self.branches_path = normalize_ttb_path('--branches', branches_path)
+        paths_to_check.append(self.branches_path)
+
+      if tags_path is not None:
+        self.tags_path = normalize_ttb_path('--tags', tags_path)
+        paths_to_check.append(self.tags_path)
+
+    verify_paths_disjoint(*paths_to_check)
 
     # A list of transformation rules (regexp, replacement) applied to
     # symbol names in this project.
@@ -185,41 +193,8 @@ class Project(object):
 
     return newname
 
-  def get_trunk(self):
-    """Return the Trunk instance for this project.
-
-    This method can only be called after self.trunk_id has been
-    initialized in CollectRevsPass."""
-
-    return Ctx()._symbol_db.get_symbol(self.trunk_id)
-
-  def get_root_cvs_directory(self):
-    """Return the root CVSDirectory instance for this project.
-
-    This method can only be called after self.root_cvs_directory_id
-    has been initialized in CollectRevsPass."""
-
-    return Ctx()._cvs_file_db.get_file(self.root_cvs_directory_id)
-
-  def get_initial_directories(self):
-    """Generate the project's initial SVN directories.
-
-    Yield as strings the SVN paths of directories that should be
-    created when the project is first created."""
-
-    # Yield the path of the Trunk symbol for this project (which might
-    # differ from the one passed to the --trunk option because of
-    # SymbolStrategyRules).  The trunk path might be '' during a
-    # trunk-only conversion, but that is OK because DumpfileDelegate
-    # considers that directory to exist already and will therefore
-    # ignore it:
-    yield self.get_trunk().base_path
-
-    for path in self._initial_directories:
-      yield path
-
   def __str__(self):
-    return self.project_cvs_repos_path
+    return self.trunk_path or self.project_cvs_repos_path
 
 
 def read_projects(filename):

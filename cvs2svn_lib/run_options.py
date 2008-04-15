@@ -56,15 +56,11 @@ from cvs2svn_lib.symbol_strategy import BranchIfCommitsRule
 from cvs2svn_lib.symbol_strategy import ExcludeRegexpStrategyRule
 from cvs2svn_lib.symbol_strategy import ForceBranchRegexpStrategyRule
 from cvs2svn_lib.symbol_strategy import ForceTagRegexpStrategyRule
-from cvs2svn_lib.symbol_strategy import ExcludeTrivialImportBranchRule
-from cvs2svn_lib.symbol_strategy import ExcludeVendorBranchRule
 from cvs2svn_lib.symbol_strategy import HeuristicStrategyRule
 from cvs2svn_lib.symbol_strategy import UnambiguousUsageRule
 from cvs2svn_lib.symbol_strategy import HeuristicPreferredParentRule
 from cvs2svn_lib.symbol_strategy import SymbolHintsFileRule
-from cvs2svn_lib.symbol_strategy import TrunkPathRule
-from cvs2svn_lib.symbol_strategy import BranchesPathRule
-from cvs2svn_lib.symbol_strategy import TagsPathRule
+from cvs2svn_lib.symbol_strategy import DefaultBasePathRule
 from cvs2svn_lib.symbol_transform import ReplaceSubstringsSymbolTransform
 from cvs2svn_lib.symbol_transform import RegexpSymbolTransform
 from cvs2svn_lib.symbol_transform import NormalizePathsSymbolTransform
@@ -126,8 +122,6 @@ history.
       --force-branch=REGEXP  force symbols matching REGEXP to be branches
       --force-tag=REGEXP     force symbols matching REGEXP to be tags
       --exclude=REGEXP       exclude branches and tags matching REGEXP
-      --keep-trivial-imports do not exclude branches that were only used for
-                             a single import (usually these are unneeded)
       --symbol-default=OPT   specify how ambiguous symbols are converted.
                              OPT is "heuristic" (default), "strict", "branch",
                              or "tag"
@@ -221,8 +215,7 @@ class RunOptions:
           "encoding=", "fallback-encoding=",
           "symbol-transform=",
           "symbol-hints=",
-          "force-branch=", "force-tag=", "exclude=",
-          "keep-trivial-imports", "symbol-default=",
+          "force-branch=", "force-tag=", "exclude=", "symbol-default=",
           "no-cross-branch-commits",
           "retain-conflicting-attic-files",
           "username=",
@@ -295,7 +288,6 @@ class RunOptions:
         self,
         project_cvs_repos_path,
         trunk_path=None, branches_path=None, tags_path=None,
-        initial_directories=[],
         symbol_transforms=None,
         symbol_strategy_rules=[],
         ):
@@ -306,28 +298,12 @@ class RunOptions:
     SymbolStrategyRules that will be applied to symbols in this
     project."""
 
-    initial_directories = [
-        path
-        for path in [trunk_path, branches_path, tags_path]
-        if path
-        ] + list(initial_directories)
-
-    symbol_strategy_rules = list(symbol_strategy_rules)
-
-    # Add rules to set the SVN paths for LODs depending on whether
-    # they are the trunk, tags, or branches:
-    if trunk_path is not None:
-      symbol_strategy_rules.append(TrunkPathRule(trunk_path))
-    if branches_path is not None:
-      symbol_strategy_rules.append(BranchesPathRule(branches_path))
-    if tags_path is not None:
-      symbol_strategy_rules.append(TagsPathRule(tags_path))
-
     id = len(self.projects)
     project = Project(
         id,
         project_cvs_repos_path,
-        initial_directories=initial_directories,
+        trunk_path=trunk_path,
+        branches_path=branches_path, tags_path=tags_path,
         symbol_transforms=symbol_transforms,
         )
 
@@ -399,7 +375,6 @@ class RunOptions:
     use_rcs = False
     use_cvs = False
     use_internal_co = False
-    keep_trivial_imports = False
     symbol_strategy_default = 'heuristic'
     mime_types_file = None
     auto_props_file = None
@@ -456,8 +431,6 @@ class RunOptions:
         force_tag = True
       elif opt == '--exclude':
         symbol_strategy_rules.append(ExcludeRegexpStrategyRule(value))
-      elif opt == '--keep-trivial-imports':
-        keep_trivial_imports = True
       elif opt == '--symbol-default':
         if value not in ['branch', 'tag', 'heuristic', 'strict']:
           raise FatalError(
@@ -631,9 +604,6 @@ class RunOptions:
         NormalizePathsSymbolTransform(),
         ])
 
-    if not keep_trivial_imports:
-      symbol_strategy_rules.append(ExcludeTrivialImportBranchRule())
-
     symbol_strategy_rules.append(UnambiguousUsageRule())
     if symbol_strategy_default == 'strict':
       pass
@@ -646,6 +616,9 @@ class RunOptions:
       symbol_strategy_rules.append(HeuristicStrategyRule())
     else:
       assert False
+
+    # Now add a rule that sets the SVN path for each LOD:
+    symbol_strategy_rules.append(DefaultBasePathRule())
 
     # Now add a rule whose job it is to pick the preferred parents of
     # branches and tags:

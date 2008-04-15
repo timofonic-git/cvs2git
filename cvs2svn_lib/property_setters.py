@@ -25,7 +25,6 @@ import ConfigParser
 
 from cvs2svn_lib.boolean import *
 from cvs2svn_lib.common import warning_prefix
-from cvs2svn_lib.common import FatalError
 from cvs2svn_lib.log import Log
 
 
@@ -135,27 +134,13 @@ class AutoPropsPropertySetter(SVNPropertySetter):
   consistent with Subversion (see
   http://subversion.tigris.org/issues/show_bug.cgi?id=2036).
 
-  As a special extension to Subversion's auto-props handling, if a
-  property name is preceded by a '!' then that property is forced to
-  be left unset.
-
   If a property specified in auto-props has already been set to a
   different value, print a warning and leave the old property value
-  unchanged.
+  unchanged."""
 
-  Python's treatment of whitespaces in the ConfigParser module is
-  buggy and inconsistent.  Usually spaces are preserved, but if there
-  is at least one semicolon in the value, and the *first* semicolon is
-  preceded by a space, then that is treated as the start of a comment
-  and the rest of the line is silently discarded.  So we simply don't
-  allow spaces in the auto-props values, and if any are found, we
-  raise a FatalError."""
-
-  property_unset_re = re.compile(r'^\!(?P<name>[^\=]+)$')
-  property_set_re = re.compile(r'^(?P<name>[^\!\=][^\=]*)\=(?P<value>.*)$')
-  property_novalue_re = re.compile(r'^(?P<name>[^\!\=][^\=]*)$')
-
-  whitespace_re = re.compile(r'\s')
+  property_unset_re = re.compile('^\!(?P<name>[^\=]+)$')
+  property_set_re = re.compile('^(?P<name>[^\!\=][^\=]*)\=(?P<value>.*)$')
+  property_novalue_re = re.compile('^(?P<name>[^\!\=][^\=]*)$')
 
   class Pattern:
     """Describes the properties to be set for files matching a pattern."""
@@ -194,48 +179,24 @@ class AutoPropsPropertySetter(SVNPropertySetter):
   def preserve_case(self, s):
     return s
 
-  def _add_pattern(self, pattern, props):
-    if self.whitespace_re.search(props):
-      raise FatalError(
-          'Spaces found in the auto-props file value for pattern %r.\n'
-          '(Auto-props values must not include spaces.)'
-          % (pattern,)
-          )
+  def _add_pattern(self, pattern, value):
+    props = value.split(';')
     propdict = {}
-    for prop in props.split(';'):
+    for prop in props:
       m = self.property_unset_re.match(prop)
       if m:
-        name = m.group('name')
-        Log().debug(
-            'auto-props: For %r, leaving %r unset.' % (pattern, name,)
-            )
-        propdict[name] = None
+        propdict[m.group('name')] = None
         continue
 
       m = self.property_set_re.match(prop)
       if m:
-        name = m.group('name')
-        value = m.group('value')
-        Log().debug(
-            'auto-props: For %r, setting %r to %r.' % (pattern, name, value,)
-            )
-        propdict[name] = value
+        propdict[m.group('name')] = m.group('value')
         continue
 
       m = self.property_novalue_re.match(prop)
       if m:
-        name = m.group('name')
-        Log().debug(
-            'auto-props: For %r, setting %r to the empty string'
-            % (pattern, name,)
-            )
-        propdict[name] = ''
+        propdict[m.group('name')] = ''
         continue
-
-      Log().warn(
-          '%s: in auto-props line for %r, value %r cannot be parsed (ignored)'
-          % (warning_prefix, pattern, prop,)
-          )
 
     self.patterns.append(self.Pattern(self.transform_case(pattern), propdict))
 

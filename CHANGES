@@ -1,17 +1,3 @@
-Version ?.?.? (not yet released)
---------------------------------
-
- New features:
- * Allow arbitrary SVN directories to be created when a project is created.
- * Allow vendor branches to be excluded, grafting child symbols to trunk.
-
- Bugs fixed:
-
- Improvements and output changes:
-
- Miscellaneous:
-
-
 Version 2.1.1 (15 April 2008)
 -----------------------------
 

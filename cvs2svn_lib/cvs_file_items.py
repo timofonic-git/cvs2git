@@ -69,51 +69,18 @@ class LODItems(object):
     # cvs_branch or from one of the CVSRevisions).
     self.cvs_tags = cvs_tags
 
-  def is_trivial_import(self):
-    """Return True iff this LOD is a trivial import branch in this file.
-
-    A trivial import branch is a branch that was used for a single
-    import and nothing else.  Such a branch is eligible for being
-    grafted onto trunk, even if it has branch blockers."""
-
-    return (
-        len(self.cvs_revisions) == 1
-        and self.cvs_revisions[0].ntdbr
-        )
-
   def is_pure_ntdb(self):
     """Return True iff this LOD is a pure NTDB in this file.
 
     A pure non-trunk default branch is defined to be a branch that
-    contains only NTDB revisions (and at least one of them).  Such a
-    branch is eligible for being grafted onto trunk, even if it has
+    contains only NTDB revisions (and at least one of them).  Such
+    branches are eligible for being grafted onto trunk, even if it has
     branch blockers."""
 
     return (
         self.cvs_revisions
         and self.cvs_revisions[-1].ntdbr
         )
-
-  def iter_blockers(self):
-    if self.is_pure_ntdb():
-      # Such a branch has no blockers, because the blockers can be
-      # grafted to trunk.
-      pass
-    else:
-      # Other branches are only blocked by symbols that sprout from
-      # non-NTDB revisions:
-      non_ntdbr_revision_ids = set()
-      for cvs_revision in self.cvs_revisions:
-        if not cvs_revision.ntdbr:
-          non_ntdbr_revision_ids.add(cvs_revision.id)
-
-      for cvs_tag in self.cvs_tags:
-        if cvs_tag.source_id in non_ntdbr_revision_ids:
-          yield cvs_tag
-
-      for cvs_branch in self.cvs_branches:
-        if cvs_branch.source_id in non_ntdbr_revision_ids:
-          yield cvs_branch
 
 
 class CVSFileItems(object):
@@ -137,13 +104,13 @@ class CVSFileItems(object):
         self.root_ids.add(cvs_item.id)
 
   def __getstate__(self):
-    return (self.cvs_file.id, self.values(),)
+    return (self.cvs_file.id, self.trunk.id, self.values(),)
 
   def __setstate__(self, state):
-    (cvs_file_id, cvs_items,) = state
-    cvs_file = Ctx()._cvs_file_db.get_file(cvs_file_id)
+    (cvs_file_id, trunk_id, cvs_items,) = state
     CVSFileItems.__init__(
-        self, cvs_file, cvs_file.project.get_trunk(), cvs_items,
+        self, Ctx()._cvs_file_db.get_file(cvs_file_id),
+        Ctx()._symbol_db.get_symbol(trunk_id), cvs_items,
         )
 
   def add(self, cvs_item):
@@ -827,7 +794,8 @@ class CVSFileItems(object):
         # A symbol can only be excluded if no other symbols spring
         # from it.  This was already checked in CollateSymbolsPass, so
         # these conditions should already be satisfied.
-        assert not list(lod_items.iter_blockers())
+        assert not lod_items.cvs_branches
+        assert not lod_items.cvs_tags
 
         ntdbr_excluded |= self._exclude_branch(lod_items)
 
