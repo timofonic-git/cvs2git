@@ -21,6 +21,7 @@ import re
 
 from cvs2svn_lib.common import InternalError
 from cvs2svn_lib.common import FatalError
+from cvs2svn_lib.common import is_trunk_revision
 from cvs2svn_lib.context import Ctx
 from cvs2svn_lib.log import Log
 from cvs2svn_lib.symbol import Trunk
@@ -29,6 +30,7 @@ from cvs2svn_lib.symbol import Tag
 from cvs2svn_lib.symbol import ExcludedSymbol
 from cvs2svn_lib.cvs_item import CVSRevision
 from cvs2svn_lib.cvs_item import CVSRevisionModification
+from cvs2svn_lib.cvs_item import CVSRevisionChange
 from cvs2svn_lib.cvs_item import CVSRevisionAbsent
 from cvs2svn_lib.cvs_item import CVSRevisionNoop
 from cvs2svn_lib.cvs_item import CVSSymbol
@@ -592,6 +594,139 @@ class CVSFileItems(object):
       for id in rev_1_1.branch_commit_ids:
         cvs_rev2 = self[id]
         cvs_rev2.prev_id = cvs_rev.id
+
+  def remove_noop_revisions(self):
+    """If possible, remove any revisions which do not change anything.
+
+    These can be created by committing an unchanged file with "cvs commit -f".
+
+    We do not detect and remove in the case where a vendor branch exists
+    (with commits) and then rev 1.2 is created via a "cvs commit -f" with
+    no changes.  This is because CVS always records the diff between rev
+    1.1 (which is always identical to rev 1.1.1.1) and rev 1.2, not between
+    the last vendor branch rev (e.g. rev 1.1.1.3) and rev 1.2.
+
+    NOTE: This should be called after imported_remove_1_1(), else it will
+    remove the 1.1.1.1 revision.
+    """
+
+    # 2-step "find then delete" so we don't change the dictionary whilst
+    # iterating over it.
+    revision_ids_to_delete = []
+    for cvs_rev in self._cvs_items.itervalues():
+      if isinstance(cvs_rev, CVSRevision) and not cvs_rev.deltatext_exists:
+        if is_trunk_revision(cvs_rev.rev):
+          # on trunk, the diffs are backward so deltatext_exists==False means
+          # that the _next_ rev is empty.  So check if the next rev exists
+          # and is a change.  In that case, we delete the _next_ rev.
+          if cvs_rev.next_id is not None:
+            empty_rev = self._cvs_items[cvs_rev.next_id]
+            if (isinstance(empty_rev, CVSRevisionChange)
+                and is_trunk_revision(empty_rev.rev)):
+              revision_ids_to_delete.append(cvs_rev.next_id)
+        else:
+          # on a branch, look for an empty change rev.
+          # (A CVSRevisionChange means that this isn't an add or delete, so
+          # the deltatext should actually be the delta.  Empty delta means
+          # no-op commit).
+          if isinstance(cvs_rev, CVSRevisionChange):
+            assert cvs_rev.prev_id is not None
+            parent_rev = self._cvs_items[cvs_rev.prev_id]
+            assert isinstance(parent_rev, CVSRevision)
+            revision_ids_to_delete.append(cvs_rev.id)
+
+    for rev_id in revision_ids_to_delete:
+      assert rev_id in self._cvs_items
+      empty_rev = self._cvs_items[rev_id]
+      assert isinstance(empty_rev, CVSRevisionChange)
+      Log().debug('Removing empty revision %s' % (empty_rev,))
+      print 'Removing empty revision %s' % (empty_rev,)
+
+      # Figure out the parent revision, which is where tags and branches
+      # will be moved to.
+      assert empty_rev.id not in self.root_ids
+      assert empty_rev.prev_id is not None
+      assert empty_rev.prev_id in self._cvs_items
+      parent_rev = self._cvs_items[empty_rev.prev_id]
+      assert parent_rev is not empty_rev
+
+      Log().debug('Removing empty revision %s' % (empty_rev,))
+
+      if empty_rev.ntdbr:
+        # Nothing special to do here; the parent of a NTDBR rev is always a
+        # NTDBR rev itself.
+        assert parent_rev.ntdbr
+
+      # Move any tags
+      for id in empty_rev.tag_ids:
+        cvs_tag = self._cvs_items[id]
+        assert cvs_tag.source_lod == empty_rev.lod
+        assert cvs_tag.source_id == empty_rev.id
+        cvs_tag.source_lod = parent_rev.lod
+        cvs_tag.source_id = parent_rev.id
+      parent_rev.tag_ids.extend(empty_rev.tag_ids)
+      empty_rev.tag_ids = []
+
+      # Move any branches
+      for id in empty_rev.branch_ids:
+        cvs_branch = self._cvs_items[id]
+        assert cvs_branch.source_lod == empty_rev.lod
+        assert cvs_branch.source_id == empty_rev.id
+        cvs_branch.source_lod = parent_rev.lod
+        cvs_branch.source_id = parent_rev.id
+      # TODO: Should these go to start or end of parent_rev.branch_ids?
+      parent_rev.branch_ids[0:0] = empty_rev.branch_ids
+      empty_rev.branch_ids = []
+
+      for id in empty_rev.branch_commit_ids:
+        assert self._cvs_items[id].prev_id == empty_rev.id
+        self._cvs_items[id].prev_id = parent_rev.id
+      # TODO: Should these go to start or end of parent_rev.branch_commit_ids?
+      parent_rev.branch_commit_ids[0:0] = empty_rev.branch_commit_ids
+      empty_rev.branch_commit_ids = []
+
+      # The first revision on a branch has a special flag.  So if the
+      # empty rev has that flag, move it to the next revision on the
+      # same branch.  It the empty revision is the only commit on the
+      # branch, then the flag will be dropped.
+      if empty_rev.first_on_branch_id is not None:
+        if empty_rev.next_id is not None:
+          self._cvs_items[empty_rev.next_id].first_on_branch_id = \
+                  empty_rev.first_on_branch_id
+
+      # Fixup next/previous links
+      if empty_rev.next_id is not None:
+        next_rev = self._cvs_items[empty_rev.next_id]
+        assert next_rev.prev_id == empty_rev.id
+        next_rev.prev_id = empty_rev.prev_id
+
+      if parent_rev.next_id == empty_rev.id:
+        parent_rev.next_id = empty_rev.next_id
+      else:
+        # Parent is on a different branch.  So we have to adjust the 1st
+        # commit on branch - it's not empty_rev any more.
+        branch = None
+        for possible_branch_id in parent_rev.branch_ids:
+          possible_branch = self._cvs_items[possible_branch_id]
+          if possible_branch.next_id == empty_rev.id:
+            assert branch is None
+            branch = possible_branch
+        assert branch is not None
+        assert branch.next_id == empty_rev.id
+        branch.next_id = empty_rev.next_id
+
+        index = None
+        for n in range(len(parent_rev.branch_commit_ids)):
+          if parent_rev.branch_commit_ids[n] == empty_rev.id:
+            assert index is None
+            index = n
+        assert index is not None
+        if empty_rev.next_id is None:
+          del parent_rev.branch_commit_ids[index]
+        else:
+          parent_rev.branch_commit_ids[index] = empty_rev.next_id
+
+      del self._cvs_items[empty_rev.id]
 
   def _is_unneeded_initial_trunk_delete(self, cvs_item, metadata_db):
     if not isinstance(cvs_item, CVSRevisionNoop):

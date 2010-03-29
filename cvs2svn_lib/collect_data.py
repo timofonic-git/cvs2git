@@ -1112,13 +1112,22 @@ class CollectData:
     # Remove initial branch deletes that are not needed:
     cvs_file_items.remove_initial_branch_deletes(self.metadata_db)
 
+    cvs_file_items.check_link_consistency()
+
+    # Remove (most) "no-op" revisions, where "cvs commit -f" has been used
+    # to check in a change that does nothing.
+    # NOTE: This has to be done after imported_remove_1_1(), else
+    # it will remove the 1.1.1.1 revision.
+    if Ctx().remove_noop_revisions:
+      cvs_file_items.remove_noop_revisions()
+      cvs_file_items.check_link_consistency()
+
     # If this is a --trunk-only conversion, discard all branches and
     # tags, then draft any non-trunk default branch revisions to
     # trunk:
     if Ctx().trunk_only:
       cvs_file_items.exclude_non_trunk()
-
-    cvs_file_items.check_link_consistency()
+      cvs_file_items.check_link_consistency()
 
     self.add_cvs_file_items(cvs_file_items)
     self.symbol_stats.register(cvs_file_items)

@@ -318,6 +318,18 @@ class RunOptions(object):
             'Convert only trunk commits, not tags nor branches.'
             ),
         ))
+    group.add_option(ContextOption(
+        '--remove-noop-revisions',
+        action='store_true',
+        help=(
+            'if "cvs commit -f" has been used to commit a revision '
+            'to a file where there are no changes, ignore it.'
+            ),
+        man_help=(
+            'if "cvs commit -f" has been used to commit a revision '
+            'to a file where there are no changes, ignore it.'
+            ),
+        ))
     group.add_option(ManOption(
         '--encoding', type='string',
         action='callback', callback=self.callback_encoding,

@@ -471,6 +471,11 @@ ctx.keep_cvsignore = True
 # output repository:
 ctx.retain_conflicting_attic_files = False
 
+# To exclude "no-op" revisions, where someone has used "cvs commit -f"
+# to force a new revision of a file to be committed even though the
+# file has not actually changed, change this option to True:
+ctx.remove_noop_revisions = False
+
 # CVS uses unix login names as author names whereas git requires
 # author names to be of the form "foo <bar>".  The default is to set
 # the git author to "cvsauthor <cvsauthor>".  author_transforms can be

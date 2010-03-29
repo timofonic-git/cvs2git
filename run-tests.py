@@ -3825,6 +3825,87 @@ def include_empty_directories_no_prune():
     ('/%(branches)s/BRANCH (from /%(trunk)s:8)', 'A'),
     ))
 
+@Cvs2SvnTestFunction
+def remove_noop_revisions():
+  "test --remove-noop-revisions"
+
+  conv = ensure_conversion(
+      'empty-commits', args=['--remove-noop-revisions'],
+      )
+
+  TAG_PREFIX = "This commit was manufactured by cvs2svn to create tag '"
+  TAG_SUFFIX = "'."
+  BRANCH_PREFIX = "This commit was manufactured by cvs2svn to create branch\n'"
+  BRANCH_SUFFIX = "'."
+  INITIAL_MSG = 'Standard project directories initialized by cvs2svn.'
+
+  # Get the set of commit messages, and split it into tags, branches, and
+  # other.
+  messages = set(one_log.msg.strip(' \t\r\n')
+                 for one_log in conv.logs.itervalues())
+  if INITIAL_MSG not in messages:
+    raise Failure()
+  messages.remove(INITIAL_MSG)
+  tag_messages = frozenset(msg for msg in messages
+            if msg.startswith(TAG_PREFIX) and msg.endswith(TAG_SUFFIX))
+  messages -= tag_messages
+  tags = set(msg[len(TAG_PREFIX):-len(TAG_SUFFIX)] for msg in tag_messages)
+  branch_messages = frozenset(msg for msg in messages
+            if msg.startswith(BRANCH_PREFIX) and msg.endswith(BRANCH_SUFFIX))
+  messages -= branch_messages
+  branches = set(msg[len(BRANCH_PREFIX):-len(BRANCH_SUFFIX)]
+                 for msg in branch_messages)
+
+  # For the remaining messages, split them into no-op commits and real
+  # commits.  The test CVS repository indicates this with keywords in
+  # the log messages.
+  noop_messages = frozenset(msg for msg in messages if 'NO-OP' in msg)
+  messages -= noop_messages
+  real_messages = frozenset(msg for msg in messages if 'REAL' in msg)
+  messages -= real_messages
+
+  # All the log messages should have been classified.
+  if messages:
+      raise Failure('Unexpected log message')
+
+  # Check only the 3 real commits were kept, all no-op commits were
+  # thrown away, and all 11 branches and 10 tags were kept.
+  EXPECT_REAL_MESSAGES = frozenset([
+      'REAL commit of alpha 1.1',
+      'REAL commit of alpha 1.3',
+      'REAL commit of alpha 1.8'])
+  EXPECT_TAGS = frozenset([
+      'alpha_r_1_1_4_1_tag',
+      'alpha_r_1_1_tag',
+      'alpha_r_1_2_tag',
+      'alpha_r_1_3_tag',
+      'alpha_r_1_4_tag',
+      'alpha_r_1_5_tag',
+      'alpha_r_1_6_tag',
+      'alpha_r_1_7_tag',
+      'alpha_r_1_8_tag',
+      'alpha_r_1_9_tag'])
+  EXPECT_BRANCHES = frozenset([
+      'alpha_r_1_1_4_1_based_branch',
+      'alpha_r_1_1_based_branch_with_noop_commit',
+      'alpha_r_1_1_based_branch',
+      'alpha_r_1_2_based_branch',
+      'alpha_r_1_3_based_branch',
+      'alpha_r_1_4_based_branch',
+      'alpha_r_1_5_based_branch',
+      'alpha_r_1_6_based_branch',
+      'alpha_r_1_7_based_branch',
+      'alpha_r_1_8_based_branch',
+      'alpha_r_1_9_based_branch'])
+
+  if real_messages != EXPECT_REAL_MESSAGES:
+      raise Failure('Real commits were missing or added')
+  if noop_messages:
+      raise Failure('Some no-op commits were not removed')
+  if tags != EXPECT_TAGS:
+      raise Failure('Missing or added tags')
+  if branches != EXPECT_BRANCHES:
+      raise Failure('Missing or added branches')
 
 ########################################################################
 # Run the tests
@@ -4030,6 +4111,7 @@ test_list = [
     include_empty_directories,
 # 170:
     include_empty_directories_no_prune,
+    remove_noop_revisions,
     ]
 
 if __name__ == '__main__':
