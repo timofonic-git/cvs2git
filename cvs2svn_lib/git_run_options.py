@@ -37,7 +37,6 @@ from cvs2svn_lib.rcs_revision_manager import RCSRevisionReader
 from cvs2svn_lib.cvs_revision_manager import CVSRevisionReader
 from cvs2svn_lib.git_revision_recorder import GitRevisionRecorder
 from cvs2svn_lib.git_output_option import GitRevisionMarkWriter
-from cvs2svn_lib.output_option import NullOutputOption
 from cvs2svn_lib.git_output_option import GitOutputOption
 from cvs2svn_lib.revision_manager import NullRevisionRecorder
 from cvs2svn_lib.revision_manager import NullRevisionExcluder
@@ -214,16 +213,13 @@ class GitRunOptions(RunOptions):
     ctx.revision_excluder = NullRevisionExcluder()
     ctx.revision_reader = None
 
-    if ctx.dry_run:
-      ctx.output_option = NullOutputOption()
-    else:
-      ctx.output_option = GitOutputOption(
-          options.dumpfile,
-          GitRevisionMarkWriter(),
-          max_merges=None,
-          # Optional map from CVS author names to git author names:
-          author_transforms={}, # FIXME
-          )
+    ctx.output_option = GitOutputOption(
+        options.dumpfile,
+        GitRevisionMarkWriter(),
+        max_merges=None,
+        # Optional map from CVS author names to git author names:
+        author_transforms={}, # FIXME
+        )
 
   def set_project(
         self,
