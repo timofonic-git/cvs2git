@@ -33,6 +33,7 @@ from cvs2svn_lib.man_writer import ManWriter
 from cvs2svn_lib.rcs_revision_manager import RCSRevisionReader
 from cvs2svn_lib.cvs_revision_manager import CVSRevisionReader
 from cvs2svn_lib.git_run_options import GitRunOptions
+from cvs2svn_lib.output_option import NullOutputOption
 from cvs2svn_lib.git_output_option import GitRevisionInlineWriter
 from cvs2svn_lib.git_output_option import GitOutputOption
 from cvs2svn_lib.revision_manager import NullRevisionRecorder
@@ -164,12 +165,15 @@ class BzrRunOptions(GitRunOptions):
     ctx.revision_excluder = NullRevisionExcluder()
     ctx.revision_reader = None
 
-    ctx.output_option = GitOutputOption(
-        options.dumpfile,
-        GitRevisionInlineWriter(revision_reader),
-        max_merges=None,
-        # Optional map from CVS author names to bzr author names:
-        author_transforms={}, # FIXME
-        )
+    if ctx.dry_run:
+      ctx.output_option = NullOutputOption()
+    else:
+      ctx.output_option = GitOutputOption(
+          options.dumpfile,
+          GitRevisionInlineWriter(revision_reader),
+          max_merges=None,
+          # Optional map from CVS author names to bzr author names:
+          author_transforms={}, # FIXME
+          )
 
 
